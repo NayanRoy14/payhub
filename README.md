@@ -1,5 +1,7 @@
 # PayHub
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
+
 A UPI-first payment orchestration layer that sits between a merchant backend and
 multiple UPI-capable payment processors (Razorpay and Cashfree, both in test/sandbox
 mode). It exposes one unified API for creating payments, automatically retries and
@@ -400,5 +402,11 @@ get the real Razorpay/Cashfree order IDs the webhook requests need.
   taxonomy & handle-aware routing" above for what this feature actually does and why.
 - **Peak-time routing weight shifts and per-PSP settlement-time transparency**
   remain documented future directions, not built — see that section above.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](./LICENSE). This applies to
+the whole repository, including `sdk/payhubClient.ts` — you're free to copy
+it into your own project under the same terms.
 
 ###### with ❤️ from `Nayan`
