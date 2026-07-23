@@ -276,3 +276,50 @@ describe('handle-aware routing', () => {
     expect(tx.upiPsp).toBeUndefined();
   });
 });
+
+describe('webhook robustness against stale/out-of-order events', () => {
+  // Regression test for a real incident: a webhook claiming 'succeeded' arrived
+  // for a payment that had already been driven to a terminal 'failed' state
+  // (via a non-retryable decline). applyOutcome() used to throw on this
+  // invalid state transition, which — because nothing caught it — crashed the
+  // entire Node process via an unhandled rejection.
+  it('does not throw when a "succeeded" webhook arrives after the payment already terminally failed', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_stale_1', status: 'failed', declineCode: 'INVALID_VPA' })),
+    });
+
+    const tx = await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-stale-1' });
+    expect(tx.status).toBe('failed');
+
+    await expect(
+      handleWebhookEvent({ processor: 'razorpay', processorRef: 'order_stale_1', status: 'succeeded', raw: {} })
+    ).resolves.not.toThrow();
+
+    const afterStaleWebhook = await getPayment(tx.paymentId);
+    expect(afterStaleWebhook?.status).toBe('failed'); // unchanged — the stale webhook must not resurrect a terminal payment
+  });
+
+  it('does not throw when a "failed" webhook arrives for a processor no longer in play after a failover succeeded', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_stale_2', status: 'failed', declineCode: 'PROCESSOR_GATEWAY_ERROR' })),
+      cashfree: fakeAdapter('cashfree', async () => ({ processorRef: 'cf_stale_2', status: 'succeeded' })),
+    });
+
+    const tx = await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-stale-2' });
+    expect(tx.status).toBe('succeeded');
+
+    // A late/duplicate webhook for the original (already-superseded) razorpay attempt arrives.
+    await expect(
+      handleWebhookEvent({
+        processor: 'razorpay',
+        processorRef: 'order_stale_2',
+        status: 'failed',
+        declineCode: 'PROCESSOR_GATEWAY_ERROR',
+        raw: {},
+      })
+    ).resolves.not.toThrow();
+
+    const afterStaleWebhook = await getPayment(tx.paymentId);
+    expect(afterStaleWebhook?.status).toBe('succeeded'); // unchanged
+  });
+});

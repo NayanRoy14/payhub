@@ -1,5 +1,5 @@
 import path from 'path';
-import express, { Express } from 'express';
+import express, { Express, NextFunction, Request, Response } from 'express';
 import dotenv from 'dotenv';
 import { connectDb } from './db/connection';
 import paymentsRouter from './routes/payments.routes';
@@ -24,6 +24,18 @@ export function createApp(): Express {
   // Read-only demo dashboard — no auth, hits PayHub's own API. See README
   // "Known Limitations": local/demo use only.
   app.use('/dashboard', express.static(path.join(__dirname, '..', 'public'), { index: 'dashboard.html' }));
+
+  // Last-resort safety net: asyncHandler forwards any error a route handler
+  // throws/rejects with here instead of letting it become an unhandled
+  // rejection (which would otherwise crash the whole process — see
+  // core/paymentService.ts's applyOutcome() comment for the incident this
+  // guards against). One bad request should never take down every other
+  // in-flight request.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+    console.error('[server] unhandled route error', err);
+    res.status(500).json({ error: 'internal server error' });
+  });
 
   return app;
 }

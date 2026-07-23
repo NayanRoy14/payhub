@@ -132,15 +132,29 @@ async function applyOutcome(
   processor: ProcessorName,
   result: Pick<ChargeResult, 'status' | 'declineCode'>
 ): Promise<void> {
+  if (result.status === 'processing') {
+    doc.currentProcessor = processor;
+    return;
+  }
+
+  // Webhook delivery is at-least-once and unordered: a stale/duplicate/
+  // out-of-order webhook can claim an outcome that no longer makes sense
+  // (e.g. 'succeeded' arriving after the payment already terminally failed).
+  // Applying it would violate the state machine — ignore it instead of
+  // throwing, since a throw here would crash the whole process for what is
+  // normal, expected webhook behavior, not a programming error.
+  const targetState: PaymentState = result.status === 'succeeded' ? 'succeeded' : 'failed';
+  if (!canTransition(doc.status, targetState)) {
+    console.warn(
+      `[paymentService] ignoring stale/out-of-order outcome for payment=${doc.paymentId} processor=${processor}: cannot transition ${doc.status} -> ${targetState}`
+    );
+    return;
+  }
+
   if (result.status === 'succeeded') {
     transitionTo(doc, 'succeeded');
     doc.currentProcessor = processor;
     doc.events.push({ state: 'succeeded', processor, timestamp: new Date() });
-    return;
-  }
-
-  if (result.status === 'processing') {
-    doc.currentProcessor = processor;
     return;
   }
 
@@ -189,10 +203,10 @@ export async function listPayments(options: ListPaymentsOptions = {}): Promise<T
 
 /**
  * Applies a normalized webhook event to whichever transaction its (processor,
- * processorRef) attempt belongs to. Late/duplicate webhooks after a payment has
- * already reached a terminal state are dropped rather than re-processed, since
- * webhook delivery is at-least-once and re-applying a terminal outcome would
- * attempt an invalid state transition.
+ * processorRef) attempt belongs to. Late/duplicate/out-of-order webhooks after
+ * a payment has already reached a terminal state are dropped rather than
+ * re-processed — applyOutcome() itself guards against invalid state
+ * transitions, since webhook delivery is at-least-once and unordered.
  */
 export async function handleWebhookEvent(event: NormalizedWebhookEvent): Promise<TransactionDocument | null> {
   const doc = await TransactionModel.findOne({
@@ -200,20 +214,6 @@ export async function handleWebhookEvent(event: NormalizedWebhookEvent): Promise
   });
   if (!doc) {
     return null;
-  }
-
-  if (doc.status === 'succeeded') {
-    return doc;
-  }
-
-  const lastAttempt = doc.attempts[doc.attempts.length - 1];
-  const isDuplicateTerminalFailure =
-    doc.status === 'failed' &&
-    lastAttempt?.processor === event.processor &&
-    lastAttempt?.status === 'failed' &&
-    event.status === 'failed';
-  if (isDuplicateTerminalFailure) {
-    return doc;
   }
 
   const attempt = [...doc.attempts].reverse().find((a) => a.processor === event.processor && a.processorRef === event.processorRef);

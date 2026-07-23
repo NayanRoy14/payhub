@@ -196,6 +196,48 @@ describe('POST /webhooks/razorpay', () => {
     const getRes = await request(app).get(`/payments/${created.body.paymentId}`);
     expect(getRes.body.status).toBe('succeeded');
   });
+
+  it('regression: a stale webhook for an already-terminal payment returns 200 rather than crashing the server', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'INVALID_VPA' })),
+    });
+
+    const created = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-key-stale-1')
+      .send({ amount: 60000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+
+    // The payment above fails fast with no real processorRef (empty string, since
+    // the fake adapter's charge() failed synchronously) — seed a real attempt
+    // record with a processorRef a webhook can target, matching a payment that
+    // failed via an async decline instead.
+    await TransactionModel.updateOne(
+      { paymentId: created.body.paymentId },
+      { $set: { status: 'failed' }, $push: { attempts: { processor: 'razorpay', processorRef: 'order_stale_route_1', status: 'failed', startedAt: new Date(), endedAt: new Date() } } }
+    );
+
+    const payload = {
+      event: 'payment.captured',
+      payload: { payment: { entity: { id: 'pay_stale_route_1', order_id: 'order_stale_route_1', status: 'captured' } } },
+    };
+    const rawBody = JSON.stringify(payload);
+    const signature = crypto.createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET!).update(rawBody).digest('hex');
+
+    const webhookRes = await request(app)
+      .post('/webhooks/razorpay')
+      .set('Content-Type', 'application/json')
+      .set('x-razorpay-signature', signature)
+      .send(rawBody);
+
+    expect(webhookRes.status).toBe(200); // acknowledged, not a 500 — and critically, did not crash the process
+
+    const getRes = await request(app).get(`/payments/${created.body.paymentId}`);
+    expect(getRes.body.status).toBe('failed'); // the stale "succeeded" claim must not resurrect a terminal payment
+
+    // Prove the server is still alive and serving other requests normally.
+    const healthRes = await request(app).get('/health');
+    expect(healthRes.status).toBe(200);
+  });
 });
 
 describe('POST /webhooks/stripe', () => {
