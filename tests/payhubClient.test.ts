@@ -1,4 +1,4 @@
-import { PayHubClient, PayHubError, PayHubTimeoutError } from '../sdk/payhubClient';
+import { PayHubClient, PayHubError, PayHubNetworkError, PayHubTimeoutError } from '../sdk/payhubClient';
 
 function mockFetchOnce(status: number, body: unknown): void {
   (global.fetch as jest.Mock).mockResolvedValueOnce({
@@ -71,6 +71,41 @@ describe('PayHubClient.createPayment', () => {
       expect((err as PayHubError).message).toBe('amount, currency, paymentMethod, customerEmail are required');
     }
   });
+
+  it('throws PayHubError (not a silent undefined) when a 2xx response body is not valid JSON', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token in JSON');
+      },
+    });
+    const client = new PayHubClient({ baseUrl: 'http://localhost:3000' });
+
+    try {
+      await client.createPayment({ amount: 100000, currency: 'INR', customerEmail: 'a@b.com' });
+      fail('expected to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(PayHubError);
+      expect((err as PayHubError).status).toBe(200);
+      expect((err as PayHubError).message).toContain('non-JSON response');
+    }
+  });
+
+  it('throws PayHubNetworkError (not a raw fetch TypeError) when the request never reaches the server', async () => {
+    (global.fetch as jest.Mock).mockRejectedValueOnce(new TypeError('fetch failed'));
+    const client = new PayHubClient({ baseUrl: 'http://localhost:1' });
+
+    try {
+      await client.createPayment({ amount: 100000, currency: 'INR', customerEmail: 'a@b.com' });
+      fail('expected to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(PayHubNetworkError);
+      expect(err).not.toBeInstanceOf(PayHubError);
+      expect((err as PayHubNetworkError).message).toContain('Could not reach PayHub');
+      expect((err as PayHubNetworkError).cause).toBeInstanceOf(TypeError);
+    }
+  });
 });
 
 describe('PayHubClient.getPayment / getPaymentEvents', () => {
@@ -116,6 +151,16 @@ describe('PayHubClient.listPayments', () => {
     const [url] = (global.fetch as jest.Mock).mock.calls[0];
     expect(url).toBe('http://localhost:3000/payments');
   });
+
+  it('sends an explicit limit of 0 rather than silently dropping it (0 is falsy but still a real value)', async () => {
+    mockFetchOnce(200, []);
+    const client = new PayHubClient({ baseUrl: 'http://localhost:3000' });
+
+    await client.listPayments({ limit: 0 });
+
+    const [url] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe('http://localhost:3000/payments?limit=0');
+  });
 });
 
 describe('PayHubClient.getReconciliation', () => {
@@ -158,5 +203,20 @@ describe('PayHubClient.waitForTerminalStatus', () => {
     const client = new PayHubClient({ baseUrl: 'http://localhost:3000' });
 
     await expect(client.waitForTerminalStatus('p1', { timeoutMs: 5, pollIntervalMs: 3 })).rejects.toThrow(PayHubTimeoutError);
+  });
+
+  it('clamps a too-small pollIntervalMs to a sane floor instead of hammering the server in a tight loop', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ paymentId: 'p1', status: 'processing', amount: 100000, currency: 'INR' }),
+    });
+    const client = new PayHubClient({ baseUrl: 'http://localhost:3000' });
+
+    // pollIntervalMs: 0 previously fired ~19 requests in 500ms with no clamp.
+    const promise = client.waitForTerminalStatus('p1', { timeoutMs: 500, pollIntervalMs: 0 }).catch(() => undefined);
+    await promise;
+
+    expect((global.fetch as jest.Mock).mock.calls.length).toBeLessThan(5);
   });
 });

@@ -99,7 +99,7 @@ export interface WaitForTerminalStatusOptions {
   pollIntervalMs?: number;
 }
 
-/** Thrown for any non-2xx response. `status` and `body` let you branch on the specific error. */
+/** Thrown for any non-2xx response, or a 2xx response whose body isn't valid JSON. `status` and `body` let you branch on the specific error. */
 export class PayHubError extends Error {
   constructor(
     message: string,
@@ -108,6 +108,17 @@ export class PayHubError extends Error {
   ) {
     super(message);
     this.name = 'PayHubError';
+  }
+}
+
+/** Thrown when the request never got an HTTP response at all — DNS failure, connection refused, timeout, etc. */
+export class PayHubNetworkError extends Error {
+  constructor(
+    message: string,
+    public readonly cause: unknown
+  ) {
+    super(message);
+    this.name = 'PayHubNetworkError';
   }
 }
 
@@ -122,6 +133,9 @@ export class PayHubTimeoutError extends Error {
 function isTerminal(status: PaymentState): boolean {
   return status === 'succeeded' || status === 'failed';
 }
+
+/** Floor for waitForTerminalStatus()'s poll interval — see its use for why. */
+const MIN_POLL_INTERVAL_MS = 250;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -183,7 +197,9 @@ export class PayHubClient {
 
   async listPayments(options: ListPaymentsOptions = {}): Promise<PaymentSummary[]> {
     const params = new URLSearchParams();
-    if (options.limit) params.set('limit', String(options.limit));
+    // `if (options.limit)` would silently drop an explicit `limit: 0` (0 is
+    // falsy) and send no limit at all — check it was actually provided instead.
+    if (typeof options.limit === 'number') params.set('limit', String(options.limit));
     if (options.status) params.set('status', options.status);
     const query = params.toString();
     return this.request<PaymentSummary[]>('GET', `/payments${query ? `?${query}` : ''}`);
@@ -206,7 +222,11 @@ export class PayHubClient {
    */
   async waitForTerminalStatus(paymentId: string, options: WaitForTerminalStatusOptions = {}): Promise<PaymentDetails> {
     const timeoutMs = options.timeoutMs ?? 60_000;
-    const pollIntervalMs = options.pollIntervalMs ?? 2_000;
+    // A too-small (or zero/negative) interval turns this into a tight
+    // network-bound loop hammering your own PayHub deployment — 19 requests
+    // fired in ~500ms when tested with pollIntervalMs: 0. Clamp to a sane
+    // floor rather than trusting the caller's value outright.
+    const pollIntervalMs = Math.max(options.pollIntervalMs ?? 2_000, MIN_POLL_INTERVAL_MS);
     const deadline = Date.now() + timeoutMs;
 
     while (true) {
@@ -226,19 +246,38 @@ export class PayHubClient {
     path: string,
     options: { headers?: Record<string, string>; body?: unknown } = {}
   ): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(options.headers ?? {}),
-      },
-      body: options.body ? JSON.stringify(options.body) : undefined,
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers ?? {}),
+        },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+      });
+    } catch (err) {
+      // fetch() itself rejected — no HTTP response was ever received (DNS
+      // failure, connection refused, etc). Without this, callers checking
+      // `err instanceof PayHubError` to branch on API failures would silently
+      // miss this case, since a raw fetch rejection is a plain TypeError.
+      throw new PayHubNetworkError(`Could not reach PayHub at ${this.baseUrl}${path}: ${(err as Error).message}`, err);
+    }
 
+    // A successful JSON.parse can never itself produce `undefined` (valid
+    // JSON bodies parse to an object/array/string/number/boolean/null), so
+    // `undefined` unambiguously means "the body wasn't valid JSON" here.
     const payload = await res.json().catch(() => undefined);
+
     if (!res.ok) {
       const message = (payload as { error?: string } | undefined)?.error ?? `PayHub API error (${res.status})`;
       throw new PayHubError(message, res.status, payload);
+    }
+    if (payload === undefined) {
+      // A 2xx with a body that isn't valid JSON is unexpected enough to be an
+      // error in its own right — better than silently handing the caller
+      // `undefined` and letting them crash later on `result.someField`.
+      throw new PayHubError(`PayHub returned a non-JSON response for ${method} ${path} (HTTP ${res.status})`, res.status, undefined);
     }
     return payload as T;
   }
