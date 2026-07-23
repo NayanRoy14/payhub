@@ -313,6 +313,14 @@ here as documented "if I had more time" directions rather than built:
    Then open **http://localhost:3000/dashboard/** for the read-only demo dashboard
    (payment list, filtering, event timelines, per-processor reconciliation).
 
+## SDK & integration guide
+
+Merchant backends integrating against PayHub should start with
+**[INTEGRATION.md](./INTEGRATION.md)** — it covers the official Node.js SDK
+(`sdk/payhubClient.ts`, dependency-free, `npm run build:sdk` to compile it),
+a full worked Express checkout example, how to interpret a decline's
+`declineScope`, and the raw HTTP contract for non-Node integrators.
+
 ## Postman collection
 
 `PayHub.postman_collection.json` covers every endpoint — the happy path, both
@@ -355,6 +363,13 @@ get the real Razorpay/Cashfree order IDs the webhook requests need.
 - **The dashboard is read-only and has no authentication.** Fine for local/demo
   use since it only ever calls PayHub's own read endpoints, but don't expose it
   publicly as-is.
+- **No outbound webhooks to merchants.** PayHub receives webhooks *from*
+  Razorpay/Cashfree but doesn't yet forward payment status changes *to* a
+  merchant's backend — integrators must poll (the SDK's `waitForTerminalStatus()`
+  handles this). See [INTEGRATION.md](./INTEGRATION.md).
+- **The SDK (`sdk/payhubClient.ts`) is a single copy-paste file, not a
+  published package.** No npm registry publish step in v1 — `npm run build:sdk`
+  compiles it locally for plain-JS consumers.
 - **Weighted routing affects only the initial processor pick, not mid-flight
   rebalancing.** No ML-based or success-rate-based *adaptive* routing — weights
   are a fixed, manually-set table (`routingWeights.ts`), not learned from
