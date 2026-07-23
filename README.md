@@ -9,8 +9,8 @@ mode). It exposes one unified API for creating payments, automatically retries a
 fails over to a different processor when one fails, and normalizes webhook events
 from different processors into one consistent internal schema.
 
-**Live demo:** [payhub-ddi0.onrender.com/dashboard/](https://payhub-ddi0.onrender.com/dashboard/)
-(free-tier instance — spins down after inactivity, first request may take ~50s)
+<!-- **Live demo:** [payhub-ddi0.onrender.com/dashboard/](https://payhub-ddi0.onrender.com/dashboard/)
+(free-tier instance — spins down after inactivity, first request may take ~50s) -->
 
 > **Note on processor choice:** the original spec for this project called for
 > Razorpay + Stripe. New Stripe accounts in India are currently invite-only, so
@@ -50,8 +50,8 @@ customer's experience. See `src/core/declineTaxonomy.ts`.
 Merchant Backend
       |
       v
-+--------------------------------+
-|           PayHub Core           |
++----------------------------------+
+|           PayHub Core            |
 |                                  |
 |  Routing Engine                  |
 |  (decline-code-aware rules)      |
@@ -62,12 +62,12 @@ Merchant Backend
 |  Razorpay       Cashfree         |
 |  Adapter        Adapter          |
 |      |            |              |
-|  Webhook Normalizer               |
-|  -> internal event schema         |
+|  Webhook Normalizer              |
+|  -> internal event schema        |
 |         |                        |
-|  Transaction Store                |
-|  + Idempotency Keys               |
-+--------------------------------+
+|  Transaction Store               |
+|  + Idempotency Keys              |
++----------------------------------+
       |               |
       v               v
   Razorpay         Cashfree
