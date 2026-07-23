@@ -7,8 +7,13 @@
  * would ship as its own published package (e.g. `@payhub/sdk`); for now, copy
  * this single file into your project and import it directly.
  *
- * Requires Node.js 18+ (uses the built-in `fetch`). No dependencies.
+ * Requires Node.js 18+ (uses the built-in `fetch`). No dependencies beyond
+ * Node's own built-in `crypto` module (used only by
+ * verifyMerchantWebhookSignature, for merchants receiving PayHub's outbound
+ * webhooks — see INTEGRATION.md).
  */
+
+import crypto from 'crypto';
 
 export type PaymentState = 'created' | 'processing' | 'retrying' | 'succeeded' | 'failed';
 export type ProcessorName = 'razorpay' | 'stripe' | 'cashfree';
@@ -216,9 +221,12 @@ export class PayHubClient {
    * result without setting up your own webhook receiver.
    *
    * For production traffic at scale, prefer having your backend listen for
-   * PayHub's own webhook (not built yet — see the SDK/integration docs'
-   * "Known limitations": PayHub currently only receives webhooks from
-   * Razorpay/Cashfree, it doesn't yet forward status changes to merchants).
+   * PayHub's own outbound webhook instead of polling — PayHub POSTs a signed
+   * `payment.succeeded`/`payment.failed` event to `MERCHANT_WEBHOOK_URL` as
+   * soon as a payment reaches a terminal state (see
+   * verifyMerchantWebhookSignature below and INTEGRATION.md's "Receiving
+   * outbound webhooks from PayHub"). This method remains a fine standalone
+   * option — or a fallback — if you haven't set up a receiver.
    */
   async waitForTerminalStatus(paymentId: string, options: WaitForTerminalStatusOptions = {}): Promise<PaymentDetails> {
     const timeoutMs = options.timeoutMs ?? 60_000;
@@ -281,4 +289,47 @@ export class PayHubClient {
     }
     return payload as T;
   }
+}
+
+/** The event types PayHub's outbound merchant webhook can send. */
+export type MerchantWebhookEvent = 'payment.succeeded' | 'payment.failed';
+
+/** Shape of the JSON body PayHub POSTs to MERCHANT_WEBHOOK_URL. */
+export interface MerchantWebhookPayload {
+  event: MerchantWebhookEvent;
+  paymentId: string;
+  status: 'succeeded' | 'failed';
+  processor?: ProcessorName;
+  retriedFrom?: ProcessorName;
+  declineCode?: string;
+  declineScope?: 'processor' | 'npci_network' | 'bank_or_vpa' | 'customer_action';
+  amount: number;
+  currency: string;
+  upiPsp?: string;
+  timestamp: string;
+}
+
+/**
+ * Verifies the `X-PayHub-Signature` header on PayHub's outbound webhook
+ * request against the raw request body, using the same HMAC-SHA256 hex
+ * scheme PayHub itself uses to verify Razorpay's inbound webhooks. `rawBody`
+ * must be the exact, unparsed request body bytes/string PayHub signed — as
+ * with any HMAC webhook signature (Razorpay, Stripe, Cashfree included),
+ * verifying against a re-serialized `JSON.stringify(parsedBody)` can silently
+ * fail on key-order/whitespace differences even for a genuine request, so
+ * read the body raw (e.g. Express's `express.raw()`) before parsing it.
+ */
+export function verifyMerchantWebhookSignature(
+  rawBody: string | Buffer,
+  signatureHeader: string | undefined,
+  secret: string
+): boolean {
+  if (!signatureHeader || !secret || rawBody.length === 0) return false;
+
+  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  const actualBuf = Buffer.from(signatureHeader, 'utf8');
+
+  if (expectedBuf.length !== actualBuf.length) return false;
+  return crypto.timingSafeEqual(expectedBuf, actualBuf);
 }

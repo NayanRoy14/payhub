@@ -4,6 +4,7 @@ import { TransactionModel } from '../src/db/models/transaction.model';
 import { ChargeRequest, ChargeResult, ProcessorAdapter } from '../src/adapters/adapter.interface';
 import { createPayment, getPayment, handleWebhookEvent, resetAdapters, setAdapters } from '../src/core/paymentService';
 import { setRandomFn } from '../src/core/routingEngine';
+import { resetFetchImpl, resetSleepFn, setFetchImpl, setSleepFn } from '../src/webhooks/merchantNotifier';
 
 let mongod: MongoMemoryServer;
 
@@ -413,5 +414,133 @@ describe('concurrent webhook delivery (race conditions)', () => {
     // may appear after a later state that logically supersedes it.
     const states = final!.events.map((e) => e.state);
     expect(states).toEqual(['created', 'processing', 'failed', 'retrying']);
+  });
+});
+
+describe('outbound merchant webhook notifications', () => {
+  const originalUrl = process.env.MERCHANT_WEBHOOK_URL;
+  let fetchMock: jest.Mock;
+
+  // notifyMerchant() is fire-and-forget from paymentService's perspective, but
+  // a successful single-attempt delivery is invoked synchronously up to its
+  // first `await fetchImpl(...)` — so by the time createPayment()/
+  // handleWebhookEvent() resolve, the mock has already recorded the call.
+  // flush() adds one extra microtask tick as a safety margin regardless.
+  async function flush(): Promise<void> {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  beforeEach(() => {
+    process.env.MERCHANT_WEBHOOK_URL = 'https://merchant.example.com/webhook';
+    process.env.MERCHANT_WEBHOOK_SECRET = 'test-secret';
+    fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+    setFetchImpl(fetchMock as any);
+    setSleepFn(async () => {});
+  });
+
+  afterEach(() => {
+    if (originalUrl === undefined) delete process.env.MERCHANT_WEBHOOK_URL;
+    else process.env.MERCHANT_WEBHOOK_URL = originalUrl;
+    delete process.env.MERCHANT_WEBHOOK_SECRET;
+    resetFetchImpl();
+    resetSleepFn();
+  });
+
+  it('notifies the merchant exactly once when a payment succeeds outright', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_notify_1', status: 'succeeded' })),
+    });
+
+    await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-notify-1' });
+    await flush();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers['X-PayHub-Event']).toBe('payment.succeeded');
+  });
+
+  it('notifies the merchant exactly once for a terminal failure reached after a failover', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'PROCESSOR_GATEWAY_ERROR' })),
+      cashfree: fakeAdapter('cashfree', async () => ({ processorRef: '', status: 'failed', declineCode: 'PSP_THROTTLED' })),
+    });
+
+    await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-notify-2' });
+    await flush();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers['X-PayHub-Event']).toBe('payment.failed');
+  });
+
+  it('notifies the merchant exactly once when a webhook resolves an async (processing) payment', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_notify_3', status: 'processing' })),
+    });
+
+    await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-notify-3' });
+    await flush();
+    expect(fetchMock).not.toHaveBeenCalled(); // still 'processing' — nothing terminal to report yet
+
+    await handleWebhookEvent({ processor: 'razorpay', processorRef: 'order_notify_3', status: 'succeeded', raw: {} });
+    await flush();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not notify on an idempotent-replay createPayment call', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_notify_4', status: 'succeeded' })),
+    });
+
+    const idempotencyKey = 'idem-notify-4';
+    await createPayment({ ...basePaymentInput, idempotencyKey });
+    await flush();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockClear();
+    await createPayment({ ...basePaymentInput, idempotencyKey }); // replay of the same Idempotency-Key
+    await flush();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not re-notify on a stale/duplicate webhook after the payment is already terminal', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_notify_5', status: 'processing' })),
+    });
+
+    await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-notify-5' });
+    await handleWebhookEvent({ processor: 'razorpay', processorRef: 'order_notify_5', status: 'succeeded', raw: {} });
+    await flush();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockClear();
+    // Duplicate delivery of the same terminal webhook.
+    await handleWebhookEvent({ processor: 'razorpay', processorRef: 'order_notify_5', status: 'succeeded', raw: {} });
+    await flush();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not notify twice for two concurrent deliveries of the same terminal webhook', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_notify_6', status: 'processing' })),
+    });
+
+    await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-notify-6' });
+
+    const event = {
+      processor: 'razorpay' as const,
+      processorRef: 'order_notify_6',
+      status: 'succeeded' as const,
+      raw: {},
+    };
+    await Promise.allSettled([handleWebhookEvent(event), handleWebhookEvent(event)]);
+    await flush();
+
+    // Whichever delivery wins the optimistic-concurrency race is the only one
+    // that should notify — the loser's VersionError branch must not notify.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

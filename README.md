@@ -217,6 +217,44 @@ Unverified webhooks are rejected with `401`. The Stripe route exists and works
 (`StripeAdapter` is fully implemented) but won't receive real traffic unless you
 have Stripe test credentials and flip `routingEngine`'s `PROCESSOR_ORDER` back.
 
+## Outbound merchant webhooks
+
+The routes above are webhooks PayHub *receives* from processors. Separately,
+PayHub can *send* a webhook of its own to your merchant backend the moment a
+payment reaches a terminal state — set `MERCHANT_WEBHOOK_URL` (and
+`MERCHANT_WEBHOOK_SECRET`) and PayHub POSTs there; leave it unset and PayHub
+just doesn't attempt delivery (integrators can still poll via the SDK's
+`waitForTerminalStatus()`, see [INTEGRATION.md](./INTEGRATION.md)).
+
+Only terminal outcomes are forwarded — `payment.succeeded`, and
+`payment.failed` once the routing engine has genuinely given up (no
+`processing`/`retrying` intermediate events). The body is signed the same way
+Razorpay/Cashfree sign their own webhooks to PayHub: HMAC-SHA256 hex over the
+raw JSON body, sent as `X-PayHub-Signature`, alongside `X-PayHub-Event`.
+`sdk/payhubClient.ts` exports `verifyMerchantWebhookSignature()` to check it
+on the receiving end.
+
+```json
+{
+  "event": "payment.succeeded",
+  "paymentId": "internal-uuid",
+  "status": "succeeded",
+  "processor": "cashfree",
+  "retriedFrom": "razorpay",
+  "amount": 100000,
+  "currency": "INR",
+  "upiPsp": "phonepe",
+  "timestamp": "2026-07-23T10:15:00.000Z"
+}
+```
+
+A `payment.failed` event additionally carries `declineCode`/`declineScope`
+from the last processor attempt. Delivery is in-process and best-effort — up
+to 4 attempts with backoff (1s/3s/9s), a 5s timeout per attempt — fired
+without blocking the response to whichever request caused the transition
+(`POST /payments` or a processor's own `POST /webhooks/*`). See `src/webhooks/merchantNotifier.ts`
+and "Known limitations" below for what that tradeoff means in practice.
+
 ## Decline-code taxonomy & handle-aware routing
 
 `src/core/declineTaxonomy.ts` groups every decline code into one of four scopes:
@@ -287,6 +325,9 @@ walks you through creating the service and prompts for the required env vars
 - Cashfree test-mode credentials (`CASHFREE_APP_ID`/`_SECRET_KEY`).
 - Stripe test-mode credentials are optional (`StripeAdapter` isn't the active
   routed processor — see "Known limitations").
+- `MERCHANT_WEBHOOK_URL`/`MERCHANT_WEBHOOK_SECRET` are optional (see "Outbound
+  merchant webhooks" above) — leave unset if you don't have a merchant
+  backend to forward payment outcomes to yet.
 
 Once live, point Razorpay's webhook URL (Razorpay dashboard -> Webhooks) at
 `https://<your-render-url>/webhooks/razorpay`. Cashfree needs no dashboard
@@ -399,10 +440,15 @@ get the real Razorpay/Cashfree order IDs the webhook requests need.
 - **The dashboard is read-only and has no authentication.** Fine for local/demo
   use since it only ever calls PayHub's own read endpoints, but don't expose it
   publicly as-is.
-- **No outbound webhooks to merchants.** PayHub receives webhooks *from*
-  Razorpay/Cashfree but doesn't yet forward payment status changes *to* a
-  merchant's backend — integrators must poll (the SDK's `waitForTerminalStatus()`
-  handles this). See [INTEGRATION.md](./INTEGRATION.md).
+- **Outbound merchant webhook delivery is in-process and best-effort, not
+  queue-backed.** Unlike the BullMQ verification safety-net above, delivery
+  to `MERCHANT_WEBHOOK_URL` isn't persisted anywhere — it's up to 4 retries
+  with backoff, entirely in memory. A process restart mid-retry silently
+  drops a pending delivery, and there's no dead-letter/replay mechanism.
+  Wiring delivery through the existing BullMQ queue would be the natural next
+  step for stronger guarantees. Only terminal outcomes are forwarded, not
+  every state transition. See "Outbound merchant webhooks" above and
+  [INTEGRATION.md](./INTEGRATION.md).
 - **The SDK (`sdk/payhubClient.ts`) is a single copy-paste file, not a
   published package.** No npm registry publish step in v1 — `npm run build:sdk`
   compiles it locally for plain-JS consumers.

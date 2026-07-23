@@ -117,6 +117,59 @@ if (failure?.declineScope === 'bank_or_vpa') {
 See the main README's "Decline-code taxonomy & handle-aware routing" section
 for the full scope model.
 
+## Receiving outbound webhooks from PayHub
+
+Polling via `waitForTerminalStatus()` works standalone, but for production
+traffic it's more efficient to have PayHub push the outcome to you instead.
+Set `MERCHANT_WEBHOOK_URL` (and `MERCHANT_WEBHOOK_SECRET`) on your PayHub
+deployment and it POSTs a signed event there as soon as a payment reaches a
+terminal state — see the main README's "Outbound merchant webhooks" for the
+full payload shape and retry policy. Only `payment.succeeded`/`payment.failed`
+are sent; there's no callback for intermediate `processing`/`retrying` states.
+
+A minimal Express receiver, verifying the signature with the SDK's
+`verifyMerchantWebhookSignature`:
+
+```ts
+import express from 'express';
+import { verifyMerchantWebhookSignature, MerchantWebhookPayload } from './payhubClient';
+
+const app = express();
+
+// Signature verification needs the raw, unparsed body — register express.raw()
+// on this route specifically, the same way PayHub itself verifies Razorpay/
+// Cashfree/Stripe (see src/webhooks routes in the PayHub repo).
+app.post('/payhub-webhook', express.raw({ type: '*/*' }), (req, res) => {
+  const signature = req.header('x-payhub-signature');
+  const rawBody = req.body as Buffer;
+
+  if (!verifyMerchantWebhookSignature(rawBody, signature, process.env.PAYHUB_WEBHOOK_SECRET!)) {
+    res.status(401).json({ error: 'invalid signature' });
+    return;
+  }
+
+  const event = JSON.parse(rawBody.toString('utf8')) as MerchantWebhookPayload;
+  if (event.event === 'payment.succeeded') {
+    // e.g. mark the order paid, trigger fulfillment
+  } else {
+    // event.event === 'payment.failed' — event.declineScope explains why
+    // (see "Understanding a decline" above)
+  }
+
+  res.status(200).json({ received: true });
+});
+```
+
+`PAYHUB_WEBHOOK_SECRET` here is whatever value you set as PayHub's
+`MERCHANT_WEBHOOK_SECRET` — it's your secret, generated and configured by you,
+not something PayHub hands back.
+
+Delivery is best-effort (up to 4 attempts with backoff, not queue-backed) —
+see the main README's "Known limitations" for what that means if your
+endpoint is briefly unreachable. Respond `200` promptly; if your own handling
+is slow, acknowledge first and process asynchronously rather than making
+PayHub's delivery attempt time out.
+
 ## Reference: SDK methods
 
 | Method | Maps to | Notes |
@@ -151,10 +204,12 @@ and in `PayHub.postman_collection.json` (importable into Postman for interactive
 
 ## Known limitations for integrators
 
-- **No outbound webhooks yet.** PayHub receives webhooks *from* Razorpay/Cashfree
-  but doesn't yet forward payment status changes *to* your backend — you must
-  poll (`waitForTerminalStatus()` handles this for you) rather than register a
-  callback URL. This is the top candidate for the SDK's next iteration.
+- **Outbound webhook delivery is best-effort, not queue-backed.** Up to 4
+  in-process retries with backoff — a PayHub process restart mid-retry drops
+  a pending delivery, and there's no dead-letter/replay mechanism. Only
+  terminal outcomes are forwarded, not every state transition. See "Receiving
+  outbound webhooks from PayHub" above and the main README's "Known
+  limitations".
 - **`Idempotency-Key` is required on every `createPayment()` call.** The SDK
   generates one for you by default; pass your own if *you* might retry the
   call yourself (e.g. after your own network timeout), so a retry on your end

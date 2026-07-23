@@ -1,4 +1,5 @@
-import { PayHubClient, PayHubError, PayHubNetworkError, PayHubTimeoutError } from '../sdk/payhubClient';
+import crypto from 'crypto';
+import { PayHubClient, PayHubError, PayHubNetworkError, PayHubTimeoutError, verifyMerchantWebhookSignature } from '../sdk/payhubClient';
 
 function mockFetchOnce(status: number, body: unknown): void {
   (global.fetch as jest.Mock).mockResolvedValueOnce({
@@ -218,5 +219,31 @@ describe('PayHubClient.waitForTerminalStatus', () => {
     await promise;
 
     expect((global.fetch as jest.Mock).mock.calls.length).toBeLessThan(5);
+  });
+});
+
+describe('verifyMerchantWebhookSignature', () => {
+  const secret = 'merchant-secret';
+  const rawBody = JSON.stringify({ event: 'payment.succeeded', paymentId: 'p1' });
+
+  function sign(body: string, key: string): string {
+    return crypto.createHmac('sha256', key).update(body).digest('hex');
+  }
+
+  it('accepts a correctly-signed body', () => {
+    expect(verifyMerchantWebhookSignature(rawBody, sign(rawBody, secret), secret)).toBe(true);
+  });
+
+  it('rejects a tampered body', () => {
+    const tampered = JSON.stringify({ event: 'payment.succeeded', paymentId: 'p2' });
+    expect(verifyMerchantWebhookSignature(tampered, sign(rawBody, secret), secret)).toBe(false);
+  });
+
+  it('rejects a signature produced with the wrong secret', () => {
+    expect(verifyMerchantWebhookSignature(rawBody, sign(rawBody, 'wrong-secret'), secret)).toBe(false);
+  });
+
+  it('rejects when the signature header is missing', () => {
+    expect(verifyMerchantWebhookSignature(rawBody, undefined, secret)).toBe(false);
   });
 });

@@ -9,6 +9,7 @@ import { decideNextStep, primaryProcessor } from './routingEngine';
 import { declineScope } from './declineTaxonomy';
 import { classifyVpaHandle } from './upiHandles';
 import { canTransition, PaymentState } from './stateMachine';
+import { notifyMerchant } from '../webhooks/merchantNotifier';
 
 export interface CreatePaymentInput {
   amount: number;
@@ -52,6 +53,30 @@ function logRoutingDecision(doc: TransactionDocument, from: ProcessorName, decli
   console.log(
     `[routing] payment=${doc.paymentId} processor=${from} declineCode=${declineCode ?? 'none'}${handleContext} decision=${JSON.stringify(decision)}`
   );
+}
+
+/**
+ * Fires an outbound notification to the merchant's own webhook endpoint
+ * (see webhooks/merchantNotifier.ts) if — and only if — this call is what
+ * just moved the payment into a terminal state. Comparing against
+ * `statusBefore` (captured by the caller before the charge/failover cascade)
+ * rather than just checking the current status matters: a stale/duplicate
+ * webhook arriving after the payment is already terminal is a no-op in
+ * applyOutcome (status doesn't change), and re-notifying the merchant for an
+ * outcome it was already told about would be wrong.
+ *
+ * Deliberately fire-and-forget: notifyMerchant() is not awaited here, so a
+ * slow or unreachable merchant endpoint can never delay the HTTP response to
+ * the caller (POST /payments, or a processor's own POST /webhooks/*).
+ */
+function maybeNotifyMerchant(doc: TransactionDocument, statusBefore: PaymentState): void {
+  if (doc.status === statusBefore) return;
+  if (doc.status !== 'succeeded' && doc.status !== 'failed') return;
+
+  const event = doc.status === 'succeeded' ? 'payment.succeeded' : 'payment.failed';
+  notifyMerchant(doc, event).catch((err) => {
+    console.error(`[merchantWebhook] delivery failed after retries for payment=${doc.paymentId} event=${event}`, err);
+  });
 }
 
 /**
@@ -105,8 +130,10 @@ export async function createPayment(input: CreatePaymentInput): Promise<Transact
     throw err;
   }
 
+  const statusBeforeAttempt = doc.status;
   await attemptCharge(doc, processor);
   await doc.save();
+  maybeNotifyMerchant(doc, statusBeforeAttempt);
   return doc;
 }
 
@@ -259,6 +286,7 @@ export async function handleWebhookEvent(event: NormalizedWebhookEvent): Promise
     attempt.endedAt = new Date();
   }
 
+  const statusBeforeOutcome = doc.status;
   await applyOutcome(doc, event.processor, { status: event.status, declineCode: event.declineCode });
 
   try {
@@ -271,7 +299,9 @@ export async function handleWebhookEvent(event: NormalizedWebhookEvent): Promise
       // event, not two genuinely different updates). Rather than blindly
       // retrying — which risks re-running attemptCharge()'s real processor
       // API call a second time — drop this write and report the version that
-      // actually won, which already reflects the correct outcome.
+      // actually won, which already reflects the correct outcome. Do NOT
+      // notify the merchant here: this request's write lost the race, so
+      // whichever delivery actually saved is the one responsible for it.
       console.warn(
         `[paymentService] concurrent webhook write conflict for payment=${doc.paymentId}, processor=${event.processor}: dropping this update, another delivery already saved`
       );
@@ -280,5 +310,6 @@ export async function handleWebhookEvent(event: NormalizedWebhookEvent): Promise
     throw err;
   }
 
+  maybeNotifyMerchant(doc, statusBeforeOutcome);
   return doc;
 }
