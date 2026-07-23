@@ -28,8 +28,19 @@ interface TransactionLike {
   attempts: AttemptRecord[];
 }
 
-function round2(value: number): number {
-  return Math.round(value * 100) / 100;
+/**
+ * Percentage rounded to 2dp, computed from the raw numerator/denominator
+ * rather than a pre-divided float. `Math.round(((n/d)*100)*100)/100` looks
+ * equivalent but isn't: n/d can already be a double that's a hair below the
+ * "true" value (e.g. 23/160 evaluates to 14.374999999999998, not 14.375),
+ * and that error survives the *100 step, so Math.round silently rounds down
+ * (14.37 instead of 14.38) for real, reachable succeeded/closed counts —
+ * confirmed by brute-force search over succeeded<=300, closed<=500. Scaling
+ * by 10000 first and dividing once keeps this to a single floating-point
+ * operation, which avoids the accumulated error.
+ */
+function percentage(numerator: number, denominator: number): number {
+  return Math.round((numerator * 10000) / denominator) / 100;
 }
 
 /**
@@ -57,10 +68,19 @@ export function buildReconciliationReport(transactions: TransactionLike[]): Reco
     // endedAt) rather than relying on JSON.stringify's implicit NaN -> null
     // coercion — that would silently make "we have no timing data" and "the
     // timing data we have is corrupted" indistinguishable in the response.
+    // Also filter out negative durations: endedAt is set to `new Date()` at
+    // webhook-processing time on the app server that handles the webhook,
+    // while startedAt was set by whichever app server initiated the charge —
+    // in a horizontally-scaled deployment those are two different clocks,
+    // and clock skew between them can make endedAt appear to precede
+    // startedAt. A negative outlier silently drags the average down (and can
+    // make it land on an entirely plausible-looking number, e.g. averaging
+    // -10s with +20s reads as "5s average" with no sign anything was wrong)
+    // rather than producing an obviously-bogus value worth investigating.
     const durationsMs = succeeded
       .filter((a) => a.endedAt)
       .map((a) => new Date(a.endedAt as Date).getTime() - new Date(a.startedAt).getTime())
-      .filter((ms) => Number.isFinite(ms));
+      .filter((ms) => Number.isFinite(ms) && ms >= 0);
     const averageTimeToSuccessMs =
       durationsMs.length > 0 ? Math.round(durationsMs.reduce((sum, d) => sum + d, 0) / durationsMs.length) : null;
 
@@ -69,7 +89,7 @@ export function buildReconciliationReport(transactions: TransactionLike[]): Reco
       totalAttempts: attempts.length,
       succeeded: succeeded.length,
       failed: failed.length,
-      successRate: closed > 0 ? round2((succeeded.length / closed) * 100) : null,
+      successRate: closed > 0 ? percentage(succeeded.length, closed) : null,
       averageTimeToSuccessMs,
     };
   });
@@ -85,7 +105,7 @@ export function buildReconciliationReport(transactions: TransactionLike[]): Reco
       succeeded: succeededPayments,
       failed: failedPayments,
       inFlight: transactions.length - closedPayments,
-      successRate: closedPayments > 0 ? round2((succeededPayments / closedPayments) * 100) : null,
+      successRate: closedPayments > 0 ? percentage(succeededPayments, closedPayments) : null,
     },
   };
 }

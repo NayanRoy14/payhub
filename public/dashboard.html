@@ -156,13 +156,22 @@
       return res.json();
     }
 
+    // Math.round((succeeded/closed)*100) looks equivalent but isn't:
+    // succeeded/closed can already be a double that's a hair off the true
+    // value (e.g. 23/40 rounds to 57% instead of the correct 58%), and that
+    // error survives the *100 step. Scaling before the single division
+    // avoids it (see src/core/reconciliation.ts's percentage()).
+    function computeSuccessRate(succeeded, closed) {
+      return closed > 0 ? Math.round((succeeded * 100) / closed) : null;
+    }
+
     function renderSummary(payments) {
       const total = payments.length;
       const byStatus = payments.reduce((acc, p) => { acc[p.status] = (acc[p.status] || 0) + 1; return acc; }, {});
       const succeeded = byStatus.succeeded || 0;
       const failed = byStatus.failed || 0;
       const closed = succeeded + failed;
-      const successRate = closed > 0 ? Math.round((succeeded / closed) * 100) : null;
+      const successRate = computeSuccessRate(succeeded, closed);
 
       const cards = [
         { label: 'Total (shown)', value: total },

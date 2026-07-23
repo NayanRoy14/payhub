@@ -26,6 +26,15 @@ function loadEscapeHtml(): (value: unknown) => string {
   return context.escapeHtml!;
 }
 
+function loadComputeSuccessRate(): (succeeded: number, closed: number) => number | null {
+  const match = dashboardSource.match(/function computeSuccessRate\(succeeded, closed\) \{[\s\S]*?\n\s*\}/);
+  if (!match) throw new Error('computeSuccessRate function not found in dashboard.html — did it get renamed/removed?');
+  const context: { computeSuccessRate?: (succeeded: number, closed: number) => number | null } = {};
+  vm.createContext(context);
+  vm.runInContext(`${match[0]}`, context);
+  return context.computeSuccessRate!;
+}
+
 describe('dashboard.html escapeHtml()', () => {
   const escapeHtml = loadEscapeHtml();
 
@@ -57,6 +66,27 @@ describe('dashboard.html escapeHtml()', () => {
   it('passes plain, safe text through unchanged', () => {
     expect(escapeHtml('razorpay')).toBe('razorpay');
     expect(escapeHtml('BANK_SERVER_DOWN')).toBe('BANK_SERVER_DOWN');
+  });
+});
+
+describe('dashboard.html computeSuccessRate()', () => {
+  const computeSuccessRate = loadComputeSuccessRate();
+
+  it('rounds correctly for a succeeded/closed ratio that hits a floating-point double-rounding error', () => {
+    // 23/40 = 0.575 exactly in decimal but evaluates to a double a hair below
+    // it, so the naive `Math.round((succeeded/closed)*100)` rounded this down
+    // to 57% instead of the mathematically correct 58% — found by brute-force
+    // search over succeeded<=500, closed<=500; this is the smallest example.
+    expect(computeSuccessRate(23, 40)).toBe(58);
+  });
+
+  it('returns null when nothing has closed yet, rather than dividing by zero', () => {
+    expect(computeSuccessRate(0, 0)).toBeNull();
+  });
+
+  it('handles 100% and 0% correctly', () => {
+    expect(computeSuccessRate(5, 5)).toBe(100);
+    expect(computeSuccessRate(0, 5)).toBe(0);
   });
 });
 

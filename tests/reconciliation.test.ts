@@ -67,6 +67,38 @@ describe('buildReconciliationReport', () => {
     expect(buildReconciliationReport(mixedWithOneGoodDuration).perProcessor[0].averageTimeToSuccessMs).toBe(10000);
   });
 
+  it('rounds successRate correctly for succeeded/closed ratios that hit floating-point double-rounding errors', () => {
+    // 23/160 = 0.14375 exactly in decimal, but as a JS double it evaluates to
+    // 14.374999999999998 (not 14.375) — naively doing
+    // Math.round(((succeeded/closed)*100)*100)/100 rounds that down to 14.37
+    // instead of the mathematically correct 14.38. Found by brute-force
+    // search over succeeded<=300, closed<=500; this is the smallest example.
+    const transactions = Array.from({ length: 160 }, (_, i) => ({
+      status: i < 23 ? ('succeeded' as const) : ('failed' as const),
+      attempts: [attempt('razorpay', i < 23 ? 'succeeded' : 'failed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z')],
+    }));
+
+    const report = buildReconciliationReport(transactions);
+    expect(report.perProcessor[0].successRate).toBe(14.38);
+  });
+
+  it('excludes negative durations (clock skew across app servers) from averageTimeToSuccessMs instead of letting them silently pollute the average', () => {
+    // startedAt is set by whichever server initiates the charge; endedAt is
+    // set to `new Date()` by whichever server later processes the webhook —
+    // in a horizontally-scaled deployment those are different clocks, and
+    // skew between them can make endedAt appear to precede startedAt. Left
+    // unfiltered, one -10s outlier averaged with a real +20s duration reads
+    // as a perfectly plausible "5s average", hiding that anything is wrong.
+    const transactions = [
+      { status: 'succeeded', attempts: [attempt('razorpay', 'succeeded', '2026-01-01T00:00:10Z', '2026-01-01T00:00:00Z')] }, // -10s (skew)
+      { status: 'succeeded', attempts: [attempt('razorpay', 'succeeded', '2026-01-01T00:00:00Z', '2026-01-01T00:00:20Z')] }, // +20s (real)
+    ];
+
+    const report = buildReconciliationReport(transactions);
+    // Only the real +20s duration should count — not an average of -10s and +20s.
+    expect(report.perProcessor[0].averageTimeToSuccessMs).toBe(20000);
+  });
+
   it('separates stats correctly across multiple processors, e.g. a failover payment', () => {
     const transactions = [
       {
