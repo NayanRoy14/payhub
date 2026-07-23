@@ -3,7 +3,14 @@ services:
     name: payhub
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run build
+    # NODE_ENV=production (set below) is applied during the build step too,
+    # which makes a plain `npm ci` skip devDependencies — including
+    # typescript and the @types/* packages the build itself needs. Confirmed
+    # locally: `NODE_ENV=production npm ci` installs 130 packages and omits
+    # typescript entirely; `--include=dev` forces devDependencies in
+    # regardless of NODE_ENV, so the build gets what it needs while the
+    # running server still sees NODE_ENV=production.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /health
     envVars:
