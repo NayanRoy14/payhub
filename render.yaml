@@ -47,3 +47,10 @@ services:
         sync: false
       - key: MERCHANT_WEBHOOK_SECRET
         sync: false
+      # Dashboard auth — optional/opt-in, but strongly recommended on any
+      # public deployment (see README "Known limitations"). Leave unset and
+      # /dashboard/ stays open.
+      - key: DASHBOARD_USERNAME
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false

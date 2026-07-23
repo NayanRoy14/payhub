@@ -5,6 +5,7 @@ import { connectDb } from './db/connection';
 import paymentsRouter from './routes/payments.routes';
 import webhooksRouter from './routes/webhooks.routes';
 import reconciliationRouter from './routes/reconciliation.routes';
+import { dashboardAuth } from './middleware/dashboardAuth';
 
 dotenv.config();
 
@@ -21,9 +22,10 @@ export function createApp(): Express {
   app.use(webhooksRouter);
   app.use(reconciliationRouter);
 
-  // Read-only demo dashboard — no auth, hits PayHub's own API. See README
-  // "Known Limitations": local/demo use only.
-  app.use('/dashboard', express.static(path.join(__dirname, '..', 'public'), { index: 'dashboard.html' }));
+  // Read-only demo dashboard, hits PayHub's own API. Gated behind opt-in
+  // HTTP Basic Auth (see middleware/dashboardAuth.ts) — the underlying read
+  // endpoints it calls stay open. See README "Known Limitations".
+  app.use('/dashboard', dashboardAuth, express.static(path.join(__dirname, '..', 'public'), { index: 'dashboard.html' }));
 
   // Last-resort safety net: asyncHandler forwards any error a route handler
   // throws/rejects with here instead of letting it become an unhandled

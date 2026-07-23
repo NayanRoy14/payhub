@@ -206,9 +206,11 @@ not just the architecture story:
 
 ### `GET /dashboard/`
 
-Read-only demo dashboard (static HTML + vanilla JS, no build step, no auth) —
-payment list with filtering, click-to-expand event timelines, and the
-reconciliation table above, all hitting PayHub's own API. See "Known limitations."
+Read-only demo dashboard (static HTML + vanilla JS, no build step) — payment
+list with filtering, click-to-expand event timelines, and the reconciliation
+table above, all hitting PayHub's own API. Open by default; set
+`DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` to require HTTP Basic Auth on this
+route. See "Known limitations."
 
 ### `POST /webhooks/razorpay` / `POST /webhooks/cashfree` / `POST /webhooks/stripe`
 
@@ -389,6 +391,8 @@ currently wired into `server.ts`'s startup path.
 
    Then open **http://localhost:3000/dashboard/** for the read-only demo dashboard
    (payment list, filtering, event timelines, per-processor reconciliation).
+   Open by default for local use; set `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD`
+   in `.env` to require a login before deploying it anywhere public.
 
 ## SDK & integration guide
 
@@ -437,9 +441,17 @@ get the real Razorpay/Cashfree order IDs the webhook requests need.
 - **No real card network or NPCI connectivity.** This project sits in front of
   Razorpay/Cashfree test mode only; it never talks to NPCI or card networks directly.
 - **Single currency path exercised (INR/UPI).** Multi-currency is out of scope.
-- **The dashboard is read-only and has no authentication.** Fine for local/demo
-  use since it only ever calls PayHub's own read endpoints, but don't expose it
-  publicly as-is.
+- **Dashboard auth is opt-in, and scoped to the dashboard route only.**
+  Setting `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` puts HTTP Basic Auth in
+  front of `/dashboard/` (see `src/middleware/dashboardAuth.ts`); leaving
+  either unset keeps it open, which is fine for local use but not for a
+  public deployment. Either way, the underlying read endpoints the dashboard
+  calls (`GET /payments`, `/payments/:id`, `/payments/:id/events`,
+  `/reconciliation`) are **not** gated by this — they're also the SDK's read
+  methods, so protecting them too would be a breaking change for integrators
+  polling PayHub. This closes the "stumble on the URL, browse a nice UI of
+  everyone's payments" exposure, not every path to the underlying data —
+  someone who already knows the API shape can still query it directly.
 - **Outbound merchant webhook delivery is in-process and best-effort, not
   queue-backed.** Unlike the BullMQ verification safety-net above, delivery
   to `MERCHANT_WEBHOOK_URL` isn't persisted anywhere — it's up to 4 retries
