@@ -9,6 +9,9 @@ mode). It exposes one unified API for creating payments, automatically retries a
 fails over to a different processor when one fails, and normalizes webhook events
 from different processors into one consistent internal schema.
 
+**Live demo:** [payhub-ddi0.onrender.com/dashboard/](https://payhub-ddi0.onrender.com/dashboard/)
+(free-tier instance — spins down after inactivity, first request may take ~50s)
+
 > **Note on processor choice:** the original spec for this project called for
 > Razorpay + Stripe. New Stripe accounts in India are currently invite-only, so
 > real sandbox credentials aren't obtainable — Cashfree Payments (self-serve India
