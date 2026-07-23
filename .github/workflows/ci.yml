@@ -9,6 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # mongodb-memory-server's postinstall download (below) has been observed to
+    # stall indefinitely on the runner's network rather than fail fast — without
+    # this, a stuck run ties up the runner for GitHub's default 6-hour job limit
+    # instead of failing in a few minutes.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -16,6 +21,15 @@ jobs:
         with:
           node-version: '20.x'
           cache: 'npm'
+
+      # mongodb-memory-server downloads a real mongod binary during `npm ci`'s
+      # postinstall step (tests spin up a real in-memory MongoDB, not a mock).
+      # Caching it keyed on OS + the pinned version means only the very first
+      # run per version ever pays for that download.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: ${{ runner.os }}-mongodb-binaries-9.5.0
 
       - run: npm ci
 
