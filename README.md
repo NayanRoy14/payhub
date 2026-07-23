@@ -271,6 +271,28 @@ here as documented "if I had more time" directions rather than built:
   the customer-facing "succeeded" latency `reconciliation.ts` already tracks),
   which is a real, underexposed pain point for merchants choosing between PSPs.
 
+## Deployment
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/NayanRoy14/payhub)
+
+`render.yaml` in the repo root is a Render Blueprint — clicking the button above
+walks you through creating the service and prompts for the required env vars
+(it doesn't pull any secrets from the repo). You'll need:
+
+- A MongoDB Atlas connection string (`MONGODB_URI`) — same free-tier setup as below.
+- Razorpay test-mode credentials (`RAZORPAY_KEY_ID`/`_KEY_SECRET`/`_WEBHOOK_SECRET`).
+- Cashfree test-mode credentials (`CASHFREE_APP_ID`/`_SECRET_KEY`).
+- Stripe test-mode credentials are optional (`StripeAdapter` isn't the active
+  routed processor — see "Known limitations").
+
+Once live, point each processor's webhook URL (Razorpay/Cashfree dashboard ->
+Webhooks) at `https://<your-render-url>/webhooks/razorpay` and `/webhooks/cashfree`,
+and the read-only dashboard is served at `/dashboard/`.
+
+Redis isn't required for deployment — the BullMQ verification queue
+(`src/queue/retryQueue.ts`) exists as a safety-net implementation but isn't
+currently wired into `server.ts`'s startup path.
+
 ## Setup (free sandbox / test-mode credentials only)
 
 1. **Install dependencies**
@@ -281,8 +303,9 @@ here as documented "if I had more time" directions rather than built:
 
 2. **MongoDB** — run locally (`mongod`) or use a free-tier [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) cluster.
 
-3. **Redis** — required only for the BullMQ verification-safety-net queue. Run
-   locally or use a free-tier hosted Redis instance.
+3. **Redis** — optional. `src/queue/retryQueue.ts` implements a BullMQ
+   verification-safety-net queue, but it isn't currently wired into
+   `server.ts`'s startup path, so Redis isn't needed to run PayHub today.
 
 4. **Razorpay test mode** — sign up at [razorpay.com](https://razorpay.com), switch
    the dashboard to **Test Mode**, and grab your Test API Key ID/Secret and a

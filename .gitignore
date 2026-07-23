@@ -4,3 +4,4 @@ sdk/dist/
 .env
 *.log
 coverage/
+.claude/

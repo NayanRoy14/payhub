@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: payhub
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # MongoDB Atlas connection string (free tier is enough). Set this in
+      # the Render dashboard after the first deploy — never commit it.
+      - key: MONGODB_URI
+        sync: false
+      # Razorpay TEST MODE credentials (dashboard.razorpay.com -> Test Mode -> API Keys)
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      # Cashfree TEST MODE credentials (merchant.cashfree.com -> Developers -> API Keys)
+      - key: CASHFREE_ENV
+        value: sandbox
+      - key: CASHFREE_APP_ID
+        sync: false
+      - key: CASHFREE_SECRET_KEY
+        sync: false
+      # Stripe TEST MODE credentials — optional; StripeAdapter is implemented
+      # but not the active routed processor (see README "Known limitations").
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
