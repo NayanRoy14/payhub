@@ -53,9 +53,14 @@ export function buildReconciliationReport(transactions: TransactionLike[]): Reco
     const failed = attempts.filter((a) => a.status === 'failed');
     const closed = succeeded.length + failed.length;
 
+    // Filter out NaN explicitly (e.g. from a corrupted/malformed startedAt or
+    // endedAt) rather than relying on JSON.stringify's implicit NaN -> null
+    // coercion — that would silently make "we have no timing data" and "the
+    // timing data we have is corrupted" indistinguishable in the response.
     const durationsMs = succeeded
       .filter((a) => a.endedAt)
-      .map((a) => new Date(a.endedAt as Date).getTime() - new Date(a.startedAt).getTime());
+      .map((a) => new Date(a.endedAt as Date).getTime() - new Date(a.startedAt).getTime())
+      .filter((ms) => Number.isFinite(ms));
     const averageTimeToSuccessMs =
       durationsMs.length > 0 ? Math.round(durationsMs.reduce((sum, d) => sum + d, 0) / durationsMs.length) : null;
 

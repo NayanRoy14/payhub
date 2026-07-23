@@ -52,6 +52,21 @@ describe('buildReconciliationReport', () => {
     expect(report.perProcessor[0].averageTimeToSuccessMs).toBeNull();
   });
 
+  it('reports null (not NaN) averageTimeToSuccessMs when startedAt/endedAt are corrupted/unparseable, and does not let it poison a real duration in the same average', () => {
+    const corruptOnly = [
+      { status: 'succeeded', attempts: [{ processor: 'razorpay', status: 'succeeded', startedAt: 'garbage-date', endedAt: 'also-garbage' } as any] },
+    ];
+    expect(buildReconciliationReport(corruptOnly).perProcessor[0].averageTimeToSuccessMs).toBeNull();
+
+    const mixedWithOneGoodDuration = [
+      { status: 'succeeded', attempts: [{ processor: 'razorpay', status: 'succeeded', startedAt: 'garbage-date', endedAt: 'also-garbage' } as any] },
+      { status: 'succeeded', attempts: [attempt('razorpay', 'succeeded', '2026-01-01T00:00:00Z', '2026-01-01T00:00:10Z')] },
+    ];
+    // The one real 10s duration must still come through as a real number,
+    // not get averaged with (or replaced by) NaN from the corrupted entry.
+    expect(buildReconciliationReport(mixedWithOneGoodDuration).perProcessor[0].averageTimeToSuccessMs).toBe(10000);
+  });
+
   it('separates stats correctly across multiple processors, e.g. a failover payment', () => {
     const transactions = [
       {

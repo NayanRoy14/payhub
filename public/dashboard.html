@@ -123,6 +123,22 @@
   <script>
     const state = { expandedId: null };
 
+    // Every value rendered below can originate from processor webhook payloads
+    // (e.g. an event's `reason`, built from a decline code that echoes a
+    // processor's raw error_reason/error_code string) — never trust it enough
+    // to interpolate into innerHTML unescaped. This bit PayHub for real: a
+    // validly-signed webhook with error_reason set to an HTML tag rendered as
+    // a genuine injected DOM element in this dashboard before this fix.
+    function escapeHtml(value) {
+      if (value === null || value === undefined) return '';
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function formatAmount(amount, currency) {
       return (amount / 100).toLocaleString('en-IN', { style: 'currency', currency: currency || 'INR' });
     }
@@ -174,16 +190,16 @@
 
       body.innerHTML = payments
         .map((p) => `
-          <tr class="payment-row" data-id="${p.paymentId}">
-            <td class="mono">${p.paymentId}</td>
-            <td><span class="badge ${p.status}">${p.status}</span></td>
-            <td>${p.processor || '—'}</td>
-            <td>${p.retriedFrom || '—'}</td>
+          <tr class="payment-row" data-id="${escapeHtml(p.paymentId)}">
+            <td class="mono">${escapeHtml(p.paymentId)}</td>
+            <td><span class="badge ${escapeHtml(p.status)}">${escapeHtml(p.status)}</span></td>
+            <td>${escapeHtml(p.processor) || '—'}</td>
+            <td>${escapeHtml(p.retriedFrom) || '—'}</td>
             <td>${formatAmount(p.amount, p.currency)}</td>
-            <td>${p.upiPsp || '—'}</td>
+            <td>${escapeHtml(p.upiPsp) || '—'}</td>
             <td class="mono">${new Date(p.createdAt).toLocaleString()}</td>
           </tr>
-          <tr class="events-row" id="events-${p.paymentId}" style="display:none;"><td colspan="7"></td></tr>
+          <tr class="events-row" id="events-${escapeHtml(p.paymentId)}" style="display:none;"><td colspan="7"></td></tr>
         `)
         .join('');
 
@@ -223,15 +239,15 @@
           .map(
             (e) => `<div class="event-line">
               <span class="ts">${new Date(e.timestamp).toLocaleString()}</span>
-              <span class="badge ${e.state}">${e.state}</span>
-              ${e.processor ? `<span>${e.processor}</span>` : ''}
-              ${e.reason ? `<span class="reason">${e.reason}</span>` : ''}
-              ${e.declineScope ? `<span class="scope-tag">${e.declineScope}</span>` : ''}
+              <span class="badge ${escapeHtml(e.state)}">${escapeHtml(e.state)}</span>
+              ${e.processor ? `<span>${escapeHtml(e.processor)}</span>` : ''}
+              ${e.reason ? `<span class="reason">${escapeHtml(e.reason)}</span>` : ''}
+              ${e.declineScope ? `<span class="scope-tag">${escapeHtml(e.declineScope)}</span>` : ''}
             </div>`
           )
           .join('')}</div>`;
       } catch (err) {
-        cell.innerHTML = `<div class="events-panel">Failed to load timeline: ${err.message}</div>`;
+        cell.innerHTML = `<div class="events-panel">Failed to load timeline: ${escapeHtml(err.message)}</div>`;
       }
     }
 
@@ -250,11 +266,11 @@
       body.innerHTML = report.perProcessor
         .map(
           (p) => `<tr>
-            <td>${p.processor}</td>
-            <td>${p.totalAttempts}</td>
-            <td>${p.succeeded}</td>
-            <td>${p.failed}</td>
-            <td>${p.successRate === null ? '—' : p.successRate + '%'}</td>
+            <td>${escapeHtml(p.processor)}</td>
+            <td>${escapeHtml(p.totalAttempts)}</td>
+            <td>${escapeHtml(p.succeeded)}</td>
+            <td>${escapeHtml(p.failed)}</td>
+            <td>${p.successRate === null ? '—' : escapeHtml(p.successRate) + '%'}</td>
             <td>${formatDuration(p.averageTimeToSuccessMs)}</td>
           </tr>`
         )
