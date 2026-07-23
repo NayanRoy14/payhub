@@ -23,6 +23,28 @@ router.post(
       res.status(400).json({ error: 'only paymentMethod "upi" is supported in v1' });
       return;
     }
+    // The truthiness check above rejects 0/''/null/undefined but not a wrong
+    // *type* — a JSON body can put any type behind any key regardless of what
+    // TypeScript declares, e.g. amount: {"$gt": 0} or amount: "abc". Validate
+    // each field's actual type before it reaches the database, rather than
+    // letting Mongoose's cast error (or a downstream crash) surface as a
+    // confusing, internals-leaking 502.
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
+      res.status(400).json({ error: 'amount must be a positive number (smallest currency unit, e.g. paise)' });
+      return;
+    }
+    if (typeof currency !== 'string' || currency.trim().length === 0) {
+      res.status(400).json({ error: 'currency must be a non-empty string' });
+      return;
+    }
+    if (typeof customerEmail !== 'string' || customerEmail.trim().length === 0) {
+      res.status(400).json({ error: 'customerEmail must be a non-empty string' });
+      return;
+    }
+    if (payerVpa !== undefined && typeof payerVpa !== 'string') {
+      res.status(400).json({ error: 'payerVpa must be a string if provided' });
+      return;
+    }
 
     try {
       const tx = await createPayment({ amount, currency, paymentMethod, customerEmail, idempotencyKey, payerVpa });
@@ -40,7 +62,12 @@ router.post(
 router.get(
   '/payments',
   asyncHandler(async (req: Request, res: Response) => {
-    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    // req.query.limit can be a string, an array (?limit=1&limit=2), or a
+    // nested object (?limit[$gt]=0) depending on what the caller sends —
+    // only accept the plain-string case; anything else falls back to the
+    // default rather than producing NaN/an unvalidated value downstream.
+    const rawLimit = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN;
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 500) : undefined;
     const status = typeof req.query.status === 'string' ? (req.query.status as PaymentState) : undefined;
     const txs = await listPayments({ limit, status });
     res.status(200).json(

@@ -72,6 +72,89 @@ describe('POST /payments', () => {
     expect(first.body.paymentId).toBe(second.body.paymentId);
     expect(await TransactionModel.countDocuments({ idempotencyKey: 'route-test-key-2' })).toBe(1);
   });
+
+  it('regression: two truly concurrent requests with the same Idempotency-Key both succeed with the same paymentId', async () => {
+    setAdapters({ razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_concurrent_route', status: 'processing' })) });
+    const body = { amount: 60000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' };
+
+    const [first, second] = await Promise.all([
+      request(app).post('/payments').set('Idempotency-Key', 'route-test-concurrent-1').send(body),
+      request(app).post('/payments').set('Idempotency-Key', 'route-test-concurrent-1').send(body),
+    ]);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201); // neither request should see a 502 from a lost duplicate-key race
+    expect(first.body.paymentId).toBe(second.body.paymentId);
+    expect(await TransactionModel.countDocuments({ idempotencyKey: 'route-test-concurrent-1' })).toBe(1);
+  });
+
+  it('rejects a non-numeric amount with a clean 400 instead of a leaked Mongoose cast error', async () => {
+    const res = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-type-1')
+      .send({ amount: { $gt: 0 }, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).not.toContain('Cast to'); // no internal Mongoose error text leaked
+  });
+
+  it('rejects a negative or zero amount', async () => {
+    const res = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-type-2')
+      .send({ amount: -500, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a non-string currency', async () => {
+    const res = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-type-3')
+      .send({ amount: 50000, currency: { $gt: '' }, paymentMethod: 'upi', customerEmail: 'a@b.com' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects a non-string customerEmail', async () => {
+    const res = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-type-4')
+      .send({ amount: 50000, currency: 'INR', paymentMethod: 'upi', customerEmail: { $gt: '' } });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('regression: rejects a non-string payerVpa instead of crashing in classifyVpaHandle', async () => {
+    const res = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-type-5')
+      .send({ amount: 50000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com', payerVpa: { $ne: null } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).not.toContain('includes is not a function');
+  });
+});
+
+describe('GET /payments (query param hardening)', () => {
+  it('falls back to the default limit when limit is not a plain string (e.g. an array or nested object)', async () => {
+    setAdapters({ razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_limit_1', status: 'processing' })) });
+    await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-limit-1')
+      .send({ amount: 10000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+
+    // ?limit[$gt]=0 parses (via Express's qs) into req.query.limit = { '$gt': '0' } — an object, not a string.
+    const res = await request(app).get('/payments?limit[$gt]=0');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it('clamps an absurdly large limit rather than passing it straight to the DB query', async () => {
+    const res = await request(app).get('/payments?limit=999999999');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
 });
 
 describe('GET /payments/:id and /payments/:id/events', () => {

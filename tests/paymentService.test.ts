@@ -61,6 +61,33 @@ describe('createPayment idempotency', () => {
     const count = await TransactionModel.countDocuments({ idempotencyKey });
     expect(count).toBe(1);
   });
+
+  // Regression test for a real incident found via manual concurrent-request
+  // testing: two POST /payments requests with the same Idempotency-Key firing
+  // truly concurrently (a double-clicked "Pay" button, or a client auto-retry)
+  // both passed the findOne() "does this key already exist?" check before
+  // either had saved, so both tried to create a new transaction — the loser
+  // hit the unique-index duplicate-key error and got a raw 502 back instead
+  // of the same successful result the winner got, defeating the entire point
+  // of an idempotency key.
+  it('does not throw when the same Idempotency-Key is used by two truly concurrent requests, and both resolve to the same payment', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_concurrent_idem', status: 'processing' })),
+    });
+
+    const idempotencyKey = 'idem-concurrent-race-1';
+    const results = await Promise.allSettled([
+      createPayment({ ...basePaymentInput, idempotencyKey }),
+      createPayment({ ...basePaymentInput, idempotencyKey }),
+    ]);
+
+    expect(results.every((r) => r.status === 'fulfilled')).toBe(true);
+    const [first, second] = results.map((r) => (r as PromiseFulfilledResult<any>).value);
+    expect(first.paymentId).toBe(second.paymentId);
+
+    const count = await TransactionModel.countDocuments({ idempotencyKey });
+    expect(count).toBe(1);
+  });
 });
 
 describe('failover demo: primary times out, fallback succeeds', () => {

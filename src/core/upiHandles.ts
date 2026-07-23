@@ -38,8 +38,14 @@ export interface VpaClassification {
   psp: UpiPsp;
 }
 
-export function classifyVpaHandle(vpa: string | undefined): VpaClassification | undefined {
-  if (!vpa || !vpa.includes('@')) return undefined;
+/**
+ * Accepts `unknown` rather than `string | undefined`: this is ultimately fed
+ * by parsed JSON request bodies, where nothing at runtime enforces the
+ * TypeScript type — a caller can send `payerVpa: {}` and `vpa.includes` would
+ * throw if this function trusted the declared type instead of checking it.
+ */
+export function classifyVpaHandle(vpa: unknown): VpaClassification | undefined {
+  if (typeof vpa !== 'string' || !vpa.includes('@')) return undefined;
   const handle = vpa.split('@')[1]?.toLowerCase().trim();
   if (!handle) return undefined;
   return { handle, psp: HANDLE_TO_PSP[handle] ?? 'other' };

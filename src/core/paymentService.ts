@@ -89,7 +89,21 @@ export async function createPayment(input: CreatePaymentInput): Promise<Transact
 
   // Persist before calling any processor: the idempotency key is claimed first,
   // so a crash mid-call can never result in a silent double-charge on retry.
-  await doc.save();
+  try {
+    await doc.save();
+  } catch (err: any) {
+    if (err?.code === 11000) {
+      // Lost a race: two requests with the same Idempotency-Key passed the
+      // findOne() check above concurrently (a real scenario — a double-clicked
+      // "Pay" button, or a client library auto-retrying a slow request), and
+      // this one lost the unique-index race on save(). The whole point of an
+      // Idempotency-Key is that this is safe: return the winner's transaction
+      // instead of surfacing the database's duplicate-key error to the caller.
+      const winner = await TransactionModel.findOne({ idempotencyKey: input.idempotencyKey });
+      if (winner) return winner;
+    }
+    throw err;
+  }
 
   await attemptCharge(doc, processor);
   await doc.save();
