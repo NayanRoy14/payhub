@@ -7,6 +7,6 @@ module.exports = {
   testTimeout: 30000,
   clearMocks: true,
   transform: {
-    '^.+\\.ts$': ['ts-jest', { isolatedModules: true }]
+    '^.+\\.ts$': 'ts-jest'
   }
 };

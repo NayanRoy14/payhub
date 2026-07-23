@@ -1,5 +1,5 @@
 import { ChargeRequest, ChargeResult, NormalizedWebhookEvent, ProcessorAdapter } from './adapter.interface';
-import { normalizeCashfreeEvent } from '../webhooks/normalizer';
+import { normalizeCashfreeEvent, CASHFREE_DECLINE_CODE_MAP } from '../webhooks/normalizer';
 
 /**
  * Minimal client surface this adapter depends on — lets tests inject a fake
@@ -12,10 +12,15 @@ export interface CashfreeClient {
   getOrderPayments(orderId: string): Promise<any[]>;
 }
 
-/** Cashfree order/payment error codes -> internal decline-code vocabulary (illustrative, not exhaustive). */
+/**
+ * Errors thrown by createOrder() -> internal decline-code vocabulary (see
+ * core/declineTaxonomy.ts). `gateway_error` is treated conservatively as
+ * bank/VPA-scoped (ambiguous whether it's Cashfree's own infra or the bank's —
+ * see webhooks/normalizer.ts for the same reasoning applied to webhook declines).
+ */
 const CASHFREE_CHARGE_ERROR_MAP: Record<string, string> = {
   invalid_request_error: 'INVALID_VPA',
-  gateway_error: 'BANK_SERVER_DOWN',
+  gateway_error: 'ISSUING_BANK_UNAVAILABLE',
   internal_error: 'PROCESSOR_UNAVAILABLE',
 };
 
@@ -105,7 +110,10 @@ export class CashfreeAdapter implements ProcessorAdapter {
           customer_email: request.customerEmail,
           customer_phone: '9999999999',
         },
-        order_meta: { idempotencyKey: request.idempotencyKey },
+        order_meta: {
+          idempotencyKey: request.idempotencyKey,
+          ...(request.payerVpa ? { payerVpa: request.payerVpa } : {}),
+        },
       });
       return { processorRef: order.order_id, status: 'processing', raw: order };
     } catch (err: any) {
@@ -141,7 +149,8 @@ export class CashfreeAdapter implements ProcessorAdapter {
       status = 'succeeded';
     } else if (['FAILED', 'USER_DROPPED', 'CANCELLED'].includes(payment.payment_status)) {
       status = 'failed';
-      declineCode = (payment.error_details?.error_code ?? payment.error_details?.error_reason ?? 'UNKNOWN').toUpperCase();
+      const reason: string = payment.error_details?.error_code ?? payment.error_details?.error_reason ?? 'unknown';
+      declineCode = CASHFREE_DECLINE_CODE_MAP[reason] ?? reason.toUpperCase();
     }
 
     return { processorRef, status, declineCode, raw: payment };

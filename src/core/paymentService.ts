@@ -5,6 +5,8 @@ import { RazorpayAdapter } from '../adapters/razorpay.adapter';
 import { StripeAdapter } from '../adapters/stripe.adapter';
 import { CashfreeAdapter } from '../adapters/cashfree.adapter';
 import { decideNextStep, primaryProcessor } from './routingEngine';
+import { declineScope } from './declineTaxonomy';
+import { classifyVpaHandle } from './upiHandles';
 import { canTransition, PaymentState } from './stateMachine';
 
 export interface CreatePaymentInput {
@@ -13,6 +15,8 @@ export interface CreatePaymentInput {
   paymentMethod: 'upi';
   customerEmail: string;
   idempotencyKey: string;
+  /** Optional customer VPA — enables handle-aware decline reasoning (see core/upiHandles.ts). */
+  payerVpa?: string;
 }
 
 // 'stripe' stays registered (StripeAdapter is fully implemented and tested)
@@ -42,9 +46,10 @@ function transitionTo(doc: TransactionDocument, next: PaymentState): void {
   doc.status = next;
 }
 
-function logRoutingDecision(paymentId: string, from: ProcessorName, declineCode: string | undefined, decision: unknown): void {
+function logRoutingDecision(doc: TransactionDocument, from: ProcessorName, declineCode: string | undefined, decision: unknown): void {
+  const handleContext = doc.upiHandle ? ` handle=${doc.upiHandle} psp=${doc.upiPsp}` : '';
   console.log(
-    `[routing] payment=${paymentId} processor=${from} declineCode=${declineCode ?? 'none'} decision=${JSON.stringify(decision)}`
+    `[routing] payment=${doc.paymentId} processor=${from} declineCode=${declineCode ?? 'none'}${handleContext} decision=${JSON.stringify(decision)}`
   );
 }
 
@@ -59,6 +64,8 @@ export async function createPayment(input: CreatePaymentInput): Promise<Transact
     return existing;
   }
 
+  const vpaClassification = classifyVpaHandle(input.payerVpa);
+
   const doc = new TransactionModel({
     paymentId: uuidv4(),
     idempotencyKey: input.idempotencyKey,
@@ -66,6 +73,9 @@ export async function createPayment(input: CreatePaymentInput): Promise<Transact
     currency: input.currency,
     paymentMethod: input.paymentMethod,
     customerEmail: input.customerEmail,
+    payerVpa: input.payerVpa,
+    upiHandle: vpaClassification?.handle,
+    upiPsp: vpaClassification?.psp,
     status: 'created',
     events: [{ state: 'created', timestamp: new Date() }],
     attempts: [],
@@ -96,6 +106,7 @@ async function attemptCharge(doc: TransactionDocument, processor: ProcessorName)
       currency: doc.currency,
       paymentMethod: 'upi',
       customerEmail: doc.customerEmail,
+      payerVpa: doc.payerVpa,
     });
   } catch (err) {
     // An adapter should map its own SDK errors to a ChargeResult; this is a
@@ -108,6 +119,7 @@ async function attemptCharge(doc: TransactionDocument, processor: ProcessorName)
     processorRef: result.processorRef || undefined,
     status: result.status,
     declineCode: result.declineCode,
+    declineScope: declineScope(result.declineCode),
     startedAt: new Date(),
     endedAt: result.status === 'processing' ? undefined : new Date(),
   });
@@ -133,17 +145,19 @@ async function applyOutcome(
   }
 
   // failed
+  const scope = declineScope(result.declineCode);
   transitionTo(doc, 'failed');
   doc.events.push({
     state: 'failed',
     processor,
     reason: `declineCode:${result.declineCode ?? 'UNKNOWN'}`,
+    declineScope: scope,
     timestamp: new Date(),
   });
 
   const alreadyTried = doc.attempts.map((a) => a.processor);
   const decision = decideNextStep(processor, result.declineCode, alreadyTried);
-  logRoutingDecision(doc.paymentId, processor, result.declineCode, decision);
+  logRoutingDecision(doc, processor, result.declineCode, decision);
 
   if (decision.action === 'fail') {
     return; // terminal — doc.status stays 'failed'
@@ -158,6 +172,19 @@ async function applyOutcome(
 
 export async function getPayment(paymentId: string): Promise<TransactionDocument | null> {
   return TransactionModel.findOne({ paymentId });
+}
+
+export interface ListPaymentsOptions {
+  limit?: number;
+  status?: PaymentState;
+}
+
+/** Most-recent-first, for the dashboard/reconciliation view. */
+export async function listPayments(options: ListPaymentsOptions = {}): Promise<TransactionDocument[]> {
+  const query = options.status ? { status: options.status } : {};
+  return TransactionModel.find(query)
+    .sort({ createdAt: -1 })
+    .limit(options.limit ?? 100);
 }
 
 /**
@@ -193,6 +220,7 @@ export async function handleWebhookEvent(event: NormalizedWebhookEvent): Promise
   if (attempt) {
     attempt.status = event.status;
     attempt.declineCode = event.declineCode;
+    attempt.declineScope = declineScope(event.declineCode);
     attempt.endedAt = new Date();
   }
 

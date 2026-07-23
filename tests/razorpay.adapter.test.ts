@@ -26,7 +26,26 @@ describe('RazorpayAdapter.charge', () => {
     expect(result).toEqual({ processorRef: 'order_abc', status: 'processing', raw: { id: 'order_abc', status: 'created' } });
   });
 
-  it('maps a thrown gateway error to a retryable BANK_SERVER_DOWN failure', async () => {
+  it('passes the payer VPA through as order notes when provided', async () => {
+    const { adapter, client } = makeAdapter();
+    (client.orders.create as jest.Mock).mockResolvedValue({ id: 'order_abc' });
+
+    await adapter.charge({
+      paymentId: 'p1',
+      idempotencyKey: 'idem-1',
+      amount: 100000,
+      currency: 'INR',
+      paymentMethod: 'upi',
+      customerEmail: 'a@b.com',
+      payerVpa: 'nayan@okhdfcbank',
+    });
+
+    expect(client.orders.create).toHaveBeenCalledWith(
+      expect.objectContaining({ notes: expect.objectContaining({ payerVpa: 'nayan@okhdfcbank' }) })
+    );
+  });
+
+  it('maps a thrown GATEWAY_ERROR to a bank/VPA-scoped (non-retryable) decline, per Razorpay\'s own docs', async () => {
     const { adapter, client } = makeAdapter();
     (client.orders.create as jest.Mock).mockRejectedValue({ error: { code: 'GATEWAY_ERROR' } });
 
@@ -40,10 +59,27 @@ describe('RazorpayAdapter.charge', () => {
     });
 
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('BANK_SERVER_DOWN');
+    expect(result.declineCode).toBe('ISSUING_BANK_UNAVAILABLE');
   });
 
-  it('maps an unrecognized thrown error to PROCESSOR_UNAVAILABLE', async () => {
+  it('maps a thrown SERVER_ERROR to a processor-scoped (retryable) decline: this is Razorpay\'s own infra', async () => {
+    const { adapter, client } = makeAdapter();
+    (client.orders.create as jest.Mock).mockRejectedValue({ error: { code: 'SERVER_ERROR' } });
+
+    const result = await adapter.charge({
+      paymentId: 'p1',
+      idempotencyKey: 'idem-1',
+      amount: 100000,
+      currency: 'INR',
+      paymentMethod: 'upi',
+      customerEmail: 'a@b.com',
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.declineCode).toBe('PROCESSOR_GATEWAY_ERROR');
+  });
+
+  it('defaults an unrecognized thrown error to SERVER_ERROR -> PROCESSOR_GATEWAY_ERROR (Razorpay\'s own infra)', async () => {
     const { adapter, client } = makeAdapter();
     (client.orders.create as jest.Mock).mockRejectedValue(new Error('boom'));
 
@@ -57,7 +93,7 @@ describe('RazorpayAdapter.charge', () => {
     });
 
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('PROCESSOR_UNAVAILABLE');
+    expect(result.declineCode).toBe('PROCESSOR_GATEWAY_ERROR');
   });
 });
 
@@ -70,13 +106,13 @@ describe('RazorpayAdapter.verify', () => {
     expect(result.status).toBe('succeeded');
   });
 
-  it('reports failed with a decline code for a failed payment', async () => {
+  it('reports failed with a mapped decline code for a failed payment', async () => {
     const { adapter, client } = makeAdapter();
     (client.payments.fetch as jest.Mock).mockResolvedValue({ id: 'pay_2', status: 'failed', error_reason: 'gateway_error' });
 
     const result = await adapter.verify('pay_2');
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('GATEWAY_ERROR');
+    expect(result.declineCode).toBe('ISSUING_BANK_UNAVAILABLE');
   });
 });
 

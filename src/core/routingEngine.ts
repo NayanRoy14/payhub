@@ -1,8 +1,12 @@
 import { ProcessorName } from '../adapters/adapter.interface';
+import { DeclineScope, declineScope, isRetryableScope } from './declineTaxonomy';
+import { DEFAULT_ROUTING_WEIGHTS, RoutingWeights, selectWeightedProcessor } from './routingWeights';
 
 /**
- * Fixed primary -> fallback order for v1. No weighted/percentage or success-rate-based
- * routing — that's explicitly out of scope (see project spec, section 3).
+ * Fixed order used for *failover* target selection only — once a payment has
+ * failed, the fallback is deterministic ("the other processor"), not
+ * randomized. Weighted selection (routingWeights.ts) applies only to a brand
+ * new payment's *initial* processor; see primaryProcessor() below.
  *
  * Stripe is not in the active rotation: new Stripe accounts in India are
  * currently invite-only, so real test-mode credentials aren't obtainable.
@@ -13,70 +17,73 @@ import { ProcessorName } from '../adapters/adapter.interface';
 const PROCESSOR_ORDER: ProcessorName[] = ['razorpay', 'cashfree'];
 
 /**
- * Decline codes where retrying (even on a different processor) cannot possibly
- * succeed — the problem is with the request itself, not the processor. Failing
- * fast avoids wasted latency and a confusing UX.
- */
-const NON_RETRYABLE_DECLINE_CODES = new Set<string>([
-  'INVALID_VPA',
-  'TXN_LIMIT_EXCEEDED',
-  'INSUFFICIENT_FUNDS',
-  'INVALID_AMOUNT',
-  'CUSTOMER_CANCELLED',
-  'ACCOUNT_BLOCKED',
-]);
-
-/**
- * Decline codes that indicate a transient, processor-side problem — an instant
- * failover to another processor is likely to succeed.
- */
-const RETRYABLE_DECLINE_CODES = new Set<string>([
-  'BANK_SERVER_DOWN',
-  'PSP_THROTTLED',
-  'GATEWAY_TIMEOUT',
-  'PROCESSOR_UNAVAILABLE',
-  'NPCI_UNAVAILABLE',
-]);
-
-/**
- * The core "fail fast vs failover" decision, isolated as an explicit, independently
- * testable function. Unknown decline codes default to non-retryable: a safe default,
- * since blindly retrying an unrecognized failure risks duplicate/needless attempts.
+ * The core "fail fast vs failover" decision, isolated as an explicit,
+ * independently testable function. Backed by declineTaxonomy.ts's scope
+ * classification: only 'processor' and 'npci_network' scoped declines are
+ * retryable via failover — a 'bank_or_vpa' decline means the customer's own
+ * bank is the problem, and every processor reaches that same bank via NPCI.
  */
 export function isRetryable(declineCode: string | undefined): boolean {
-  if (!declineCode) return false;
-  if (NON_RETRYABLE_DECLINE_CODES.has(declineCode)) return false;
-  return RETRYABLE_DECLINE_CODES.has(declineCode);
+  return isRetryableScope(declineCode);
 }
 
-export function primaryProcessor(): ProcessorName {
-  return PROCESSOR_ORDER[0];
+let randomFn: () => number = Math.random;
+
+/** Test-only seam: force deterministic weighted-routing outcomes instead of relying on statistical sampling. */
+export function setRandomFn(fn: () => number): void {
+  randomFn = fn;
+}
+
+export function resetRandomFn(): void {
+  randomFn = Math.random;
+}
+
+/**
+ * Initial processor selection for a brand-new payment, weighted by
+ * DEFAULT_ROUTING_WEIGHTS (see routingWeights.ts). Failover, once a payment
+ * is in flight, is unaffected — that stays strictly decline-code-driven.
+ */
+export function primaryProcessor(weights: RoutingWeights = DEFAULT_ROUTING_WEIGHTS): ProcessorName {
+  return selectWeightedProcessor(weights, randomFn);
 }
 
 export function fallbackProcessor(current: ProcessorName): ProcessorName | undefined {
   return PROCESSOR_ORDER.find((p) => p !== current);
 }
 
-export type RoutingDecision = { action: 'failover'; to: ProcessorName } | { action: 'fail'; reason: string };
+export type RoutingDecision =
+  | { action: 'failover'; to: ProcessorName; scope: DeclineScope }
+  | { action: 'fail'; reason: string; scope?: DeclineScope };
 
 /**
  * Given the processor that just failed, its decline code, and every processor
  * already attempted for this payment, decide whether to fail over to another
- * processor or fail the payment outright.
+ * processor or fail the payment outright. The 'fail' decision always carries
+ * the decline's scope when known, so callers (logging, API responses, the
+ * dashboard) can explain *why* — e.g. "bank_or_vpa: switching processor can't
+ * help, the customer's own bank is unavailable" rather than just "failed".
  */
 export function decideNextStep(
   currentProcessor: ProcessorName,
   declineCode: string | undefined,
   alreadyTried: ProcessorName[]
 ): RoutingDecision {
-  if (!isRetryable(declineCode)) {
-    return { action: 'fail', reason: declineCode ? `non_retryable:${declineCode}` : 'unknown_failure' };
+  const scope = declineScope(declineCode);
+
+  if (!isRetryableScope(declineCode)) {
+    return {
+      action: 'fail',
+      reason: declineCode ? `non_retryable:${declineCode}` : 'unknown_failure',
+      scope,
+    };
   }
 
   const next = PROCESSOR_ORDER.find((p) => !alreadyTried.includes(p));
   if (!next) {
-    return { action: 'fail', reason: 'processors_exhausted' };
+    return { action: 'fail', reason: 'processors_exhausted', scope };
   }
 
-  return { action: 'failover', to: next };
+  // scope is guaranteed defined here: isRetryableScope only returns true for
+  // codes with a known 'processor' or 'npci_network' scope.
+  return { action: 'failover', to: next, scope: scope as DeclineScope };
 }

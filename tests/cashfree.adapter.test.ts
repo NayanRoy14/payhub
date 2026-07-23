@@ -46,7 +46,26 @@ describe('CashfreeAdapter.charge', () => {
     expect(client.createOrder).toHaveBeenCalledWith(expect.objectContaining({ order_amount: 1500.5 }));
   });
 
-  it('maps a thrown gateway error to a retryable BANK_SERVER_DOWN failure', async () => {
+  it('passes the payer VPA through as order_meta when provided', async () => {
+    const { adapter, client } = makeAdapter();
+    (client.createOrder as jest.Mock).mockResolvedValue({ order_id: 'order_abc' });
+
+    await adapter.charge({
+      paymentId: 'order_abc',
+      idempotencyKey: 'idem-1',
+      amount: 100000,
+      currency: 'INR',
+      paymentMethod: 'upi',
+      customerEmail: 'a@b.com',
+      payerVpa: 'nayan@ybl',
+    });
+
+    expect(client.createOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ order_meta: expect.objectContaining({ payerVpa: 'nayan@ybl' }) })
+    );
+  });
+
+  it('maps a thrown gateway error to a bank/VPA-scoped (non-retryable) decline', async () => {
     const { adapter, client } = makeAdapter();
     (client.createOrder as jest.Mock).mockRejectedValue({ code: 'gateway_error' });
 
@@ -60,7 +79,7 @@ describe('CashfreeAdapter.charge', () => {
     });
 
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('BANK_SERVER_DOWN');
+    expect(result.declineCode).toBe('ISSUING_BANK_UNAVAILABLE');
   });
 
   it('maps an unrecognized thrown error to PROCESSOR_UNAVAILABLE', async () => {
@@ -98,7 +117,7 @@ describe('CashfreeAdapter.verify', () => {
     expect(result.status).toBe('succeeded');
   });
 
-  it('reports failed with a decline code for a FAILED payment', async () => {
+  it('reports failed with a mapped decline code for a FAILED payment', async () => {
     const { adapter, client } = makeAdapter();
     (client.getOrderPayments as jest.Mock).mockResolvedValue([
       { payment_status: 'FAILED', error_details: { error_code: 'gateway_error' } },
@@ -106,7 +125,7 @@ describe('CashfreeAdapter.verify', () => {
 
     const result = await adapter.verify('order_3');
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('GATEWAY_ERROR');
+    expect(result.declineCode).toBe('ISSUING_BANK_UNAVAILABLE');
   });
 
   it('treats USER_DROPPED as a failed attempt', async () => {

@@ -1,6 +1,6 @@
 import Razorpay from 'razorpay';
 import { ChargeRequest, ChargeResult, NormalizedWebhookEvent, ProcessorAdapter } from './adapter.interface';
-import { normalizeRazorpayEvent } from '../webhooks/normalizer';
+import { normalizeRazorpayEvent, RAZORPAY_DECLINE_CODE_MAP } from '../webhooks/normalizer';
 
 /** Minimal slice of the Razorpay SDK surface this adapter depends on — lets tests
  * inject a fake client instead of hitting the real API. */
@@ -13,11 +13,19 @@ export interface RazorpayClient {
   };
 }
 
-/** Errors thrown by orders.create() -> internal decline-code vocabulary. */
+/**
+ * Errors thrown by orders.create() -> internal decline-code vocabulary. These
+ * are Razorpay's top-level exception codes (distinct from the more granular
+ * error_reason strings a webhook/verify() call surfaces — see
+ * webhooks/normalizer.ts's RAZORPAY_DECLINE_CODE_MAP for those). Per Razorpay's
+ * own docs, GATEWAY_ERROR originates at the bank/wallet's end (bank_or_vpa
+ * scope — failover can't help); SERVER_ERROR is Razorpay's own infra
+ * (processor scope — failover is worth trying).
+ */
 const RAZORPAY_CHARGE_ERROR_MAP: Record<string, string> = {
   BAD_REQUEST_ERROR: 'INVALID_VPA',
-  GATEWAY_ERROR: 'BANK_SERVER_DOWN',
-  SERVER_ERROR: 'PROCESSOR_UNAVAILABLE',
+  GATEWAY_ERROR: 'ISSUING_BANK_UNAVAILABLE',
+  SERVER_ERROR: 'PROCESSOR_GATEWAY_ERROR',
 };
 
 export class RazorpayAdapter implements ProcessorAdapter {
@@ -57,7 +65,11 @@ export class RazorpayAdapter implements ProcessorAdapter {
         amount: request.amount,
         currency: request.currency,
         receipt: request.paymentId,
-        notes: { idempotencyKey: request.idempotencyKey, paymentMethod: request.paymentMethod },
+        notes: {
+          idempotencyKey: request.idempotencyKey,
+          paymentMethod: request.paymentMethod,
+          ...(request.payerVpa ? { payerVpa: request.payerVpa } : {}),
+        },
       });
       return { processorRef: order.id, status: 'processing', raw: order };
     } catch (err: any) {
@@ -80,7 +92,8 @@ export class RazorpayAdapter implements ProcessorAdapter {
       status = 'succeeded';
     } else if (payment.status === 'failed') {
       status = 'failed';
-      declineCode = (payment.error_reason ?? payment.error_code ?? 'UNKNOWN').toUpperCase();
+      const reason: string = payment.error_reason ?? payment.error_code ?? 'unknown';
+      declineCode = RAZORPAY_DECLINE_CODE_MAP[reason] ?? reason.toUpperCase();
     }
 
     return { processorRef, status, declineCode, raw: payment };

@@ -9,6 +9,16 @@ export interface ChargeRequest {
   currency: string;
   paymentMethod: 'upi';
   customerEmail: string;
+  /**
+   * Optional customer VPA (e.g. "name@okhdfcbank"). Used for UPI-handle
+   * classification and decline-scope reasoning (see core/upiHandles.ts) and
+   * passed through to the processor as order metadata. Note: actually
+   * *targeting* this specific VPA for the live UPI collect request would
+   * require Razorpay's S2S UPI Collect API / Cashfree's Order-Pay API rather
+   * than the generic Orders API this adapter currently uses — see README
+   * "Known Limitations".
+   */
+  payerVpa?: string;
 }
 
 export interface ChargeResult {

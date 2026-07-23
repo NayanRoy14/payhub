@@ -1,12 +1,15 @@
 import { Schema, model, Document } from 'mongoose';
 import { PaymentState } from '../../core/stateMachine';
 import { ProcessorName } from '../../adapters/adapter.interface';
+import { DeclineScope } from '../../core/declineTaxonomy';
+import { UpiPsp } from '../../core/upiHandles';
 
 export interface AttemptRecord {
   processor: ProcessorName;
   processorRef?: string;
   status: 'processing' | 'succeeded' | 'failed';
   declineCode?: string;
+  declineScope?: DeclineScope;
   startedAt: Date;
   endedAt?: Date;
 }
@@ -15,6 +18,7 @@ export interface EventRecord {
   state: PaymentState;
   processor?: ProcessorName;
   reason?: string;
+  declineScope?: DeclineScope;
   timestamp: Date;
 }
 
@@ -25,6 +29,9 @@ export interface TransactionDocument extends Document {
   currency: string;
   paymentMethod: string;
   customerEmail: string;
+  payerVpa?: string;
+  upiHandle?: string;
+  upiPsp?: UpiPsp;
   status: PaymentState;
   currentProcessor?: ProcessorName;
   retriedFrom?: ProcessorName;
@@ -40,6 +47,7 @@ const AttemptSchema = new Schema<AttemptRecord>(
     processorRef: { type: String },
     status: { type: String, required: true },
     declineCode: { type: String },
+    declineScope: { type: String },
     startedAt: { type: Date, required: true },
     endedAt: { type: Date },
   },
@@ -51,6 +59,7 @@ const EventSchema = new Schema<EventRecord>(
     state: { type: String, required: true },
     processor: { type: String },
     reason: { type: String },
+    declineScope: { type: String },
     timestamp: { type: Date, required: true },
   },
   { _id: false }
@@ -64,6 +73,9 @@ const TransactionSchema = new Schema<TransactionDocument>(
     currency: { type: String, required: true },
     paymentMethod: { type: String, required: true },
     customerEmail: { type: String, required: true },
+    payerVpa: { type: String },
+    upiHandle: { type: String },
+    upiPsp: { type: String },
     status: { type: String, required: true, default: 'created' },
     currentProcessor: { type: String },
     retriedFrom: { type: String },

@@ -3,12 +3,17 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import { TransactionModel } from '../src/db/models/transaction.model';
 import { ChargeRequest, ChargeResult, ProcessorAdapter } from '../src/adapters/adapter.interface';
 import { createPayment, getPayment, handleWebhookEvent, resetAdapters, setAdapters } from '../src/core/paymentService';
+import { setRandomFn } from '../src/core/routingEngine';
 
 let mongod: MongoMemoryServer;
 
 beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
   await mongoose.connect(mongod.getUri());
+  // These tests are about failover/idempotency/etc., not weighted routing —
+  // force a deterministic 'razorpay' initial pick (see routingWeights.test.ts
+  // for weighted-selection coverage).
+  setRandomFn(() => 0);
 });
 
 afterAll(async () => {
@@ -109,7 +114,7 @@ describe('fail-fast on non-retryable decline code', () => {
 describe('processor exhaustion', () => {
   it('fails permanently once every processor has been tried and all failed retryably', async () => {
     setAdapters({
-      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'BANK_SERVER_DOWN' })),
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'PROCESSOR_GATEWAY_ERROR' })),
       cashfree: fakeAdapter('cashfree', async () => ({ processorRef: '', status: 'failed', declineCode: 'PSP_THROTTLED' })),
     });
 
@@ -136,7 +141,7 @@ describe('webhook-driven failover (async UPI collect flow)', () => {
       processor: 'razorpay',
       processorRef: 'order_async_1',
       status: 'failed',
-      declineCode: 'BANK_SERVER_DOWN',
+      declineCode: 'PROCESSOR_GATEWAY_ERROR',
       raw: {},
     });
 
@@ -206,5 +211,68 @@ describe('webhook-driven failover (async UPI collect flow)', () => {
         raw: {},
       })
     ).resolves.not.toThrow();
+  });
+});
+
+describe('handle-aware routing', () => {
+  it('classifies the payer VPA handle and stores it on the transaction', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_1', status: 'succeeded' })),
+    });
+
+    const tx = await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-vpa-1', payerVpa: 'nayan@ybl' });
+
+    expect(tx.payerVpa).toBe('nayan@ybl');
+    expect(tx.upiHandle).toBe('ybl');
+    expect(tx.upiPsp).toBe('phonepe');
+  });
+
+  it('fails fast on a bank/VPA-scoped decline even though a fallback processor is available: switching processor can\'t fix the customer\'s own bank being down', async () => {
+    const cashfreeCharge = jest.fn();
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({
+        processorRef: '',
+        status: 'failed',
+        declineCode: 'ISSUING_BANK_UNAVAILABLE',
+      })),
+      cashfree: fakeAdapter('cashfree', cashfreeCharge),
+    });
+
+    const tx = await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-vpa-2', payerVpa: 'nayan@okhdfcbank' });
+
+    expect(tx.status).toBe('failed');
+    expect(tx.attempts).toHaveLength(1);
+    expect(cashfreeCharge).not.toHaveBeenCalled();
+
+    const failedEvent = tx.events.find((e) => e.state === 'failed');
+    expect(failedEvent?.declineScope).toBe('bank_or_vpa');
+    expect(tx.upiPsp).toBe('google_pay');
+  });
+
+  it('records declineScope on the attempt record for reconciliation/reporting', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({
+        processorRef: '',
+        status: 'failed',
+        declineCode: 'INSUFFICIENT_FUNDS',
+      })),
+    });
+
+    const tx = await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-vpa-3', payerVpa: 'nayan@paytm' });
+
+    expect(tx.attempts[0].declineScope).toBe('bank_or_vpa');
+    expect(tx.upiPsp).toBe('paytm');
+  });
+
+  it('leaves upiHandle/upiPsp unset when no VPA is provided', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_1', status: 'succeeded' })),
+    });
+
+    const tx = await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-vpa-4' });
+
+    expect(tx.payerVpa).toBeUndefined();
+    expect(tx.upiHandle).toBeUndefined();
+    expect(tx.upiPsp).toBeUndefined();
   });
 });

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { createPayment, getPayment } from '../core/paymentService';
+import { createPayment, getPayment, listPayments } from '../core/paymentService';
+import { PaymentState } from '../core/stateMachine';
 
 const router = Router();
 
@@ -10,7 +11,7 @@ router.post('/payments', async (req: Request, res: Response) => {
     return;
   }
 
-  const { amount, currency, paymentMethod, customerEmail } = req.body ?? {};
+  const { amount, currency, paymentMethod, customerEmail, payerVpa } = req.body ?? {};
   if (!amount || !currency || !paymentMethod || !customerEmail) {
     res.status(400).json({ error: 'amount, currency, paymentMethod, customerEmail are required' });
     return;
@@ -21,7 +22,7 @@ router.post('/payments', async (req: Request, res: Response) => {
   }
 
   try {
-    const tx = await createPayment({ amount, currency, paymentMethod, customerEmail, idempotencyKey });
+    const tx = await createPayment({ amount, currency, paymentMethod, customerEmail, idempotencyKey, payerVpa });
     res.status(201).json({
       paymentId: tx.paymentId,
       status: tx.status,
@@ -30,6 +31,25 @@ router.post('/payments', async (req: Request, res: Response) => {
   } catch (err) {
     res.status(502).json({ error: 'payment creation failed', detail: (err as Error).message });
   }
+});
+
+router.get('/payments', async (req: Request, res: Response) => {
+  const limit = req.query.limit ? Number(req.query.limit) : undefined;
+  const status = typeof req.query.status === 'string' ? (req.query.status as PaymentState) : undefined;
+  const txs = await listPayments({ limit, status });
+  res.status(200).json(
+    txs.map((tx) => ({
+      paymentId: tx.paymentId,
+      status: tx.status,
+      processor: tx.currentProcessor,
+      retriedFrom: tx.retriedFrom,
+      amount: tx.amount,
+      currency: tx.currency,
+      upiPsp: tx.upiPsp,
+      createdAt: tx.createdAt,
+      updatedAt: tx.updatedAt,
+    }))
+  );
 });
 
 router.get('/payments/:id', async (req: Request, res: Response) => {
@@ -45,6 +65,7 @@ router.get('/payments/:id', async (req: Request, res: Response) => {
     retriedFrom: tx.retriedFrom,
     amount: tx.amount,
     currency: tx.currency,
+    ...(tx.payerVpa ? { payerVpa: tx.payerVpa, upiHandle: tx.upiHandle, upiPsp: tx.upiPsp } : {}),
   });
 });
 
@@ -59,6 +80,7 @@ router.get('/payments/:id/events', async (req: Request, res: Response) => {
       state: e.state,
       ...(e.processor ? { processor: e.processor } : {}),
       ...(e.reason ? { reason: e.reason } : {}),
+      ...(e.declineScope ? { declineScope: e.declineScope } : {}),
       timestamp: e.timestamp,
     }))
   );

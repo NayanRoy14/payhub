@@ -26,7 +26,7 @@ describe('StripeAdapter.charge', () => {
     expect(client.paymentIntents.create).toHaveBeenCalledWith(expect.any(Object), { idempotencyKey: 'idem-1' });
   });
 
-  it('maps a thrown processing_error to a retryable BANK_SERVER_DOWN failure', async () => {
+  it('maps a thrown processing_error to a processor-scoped (retryable) failure', async () => {
     const { adapter, client } = makeAdapter();
     (client.paymentIntents.create as jest.Mock).mockRejectedValue({ code: 'processing_error' });
 
@@ -40,7 +40,7 @@ describe('StripeAdapter.charge', () => {
     });
 
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('BANK_SERVER_DOWN');
+    expect(result.declineCode).toBe('PROCESSOR_GATEWAY_ERROR');
   });
 });
 

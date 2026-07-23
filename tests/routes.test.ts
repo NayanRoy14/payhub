@@ -6,6 +6,7 @@ import { MongoMemoryServer } from 'mongodb-memory-server';
 import { TransactionModel } from '../src/db/models/transaction.model';
 import { ChargeRequest, ChargeResult, ProcessorAdapter, ProcessorName } from '../src/adapters/adapter.interface';
 import { resetAdapters, setAdapters } from '../src/core/paymentService';
+import { setRandomFn } from '../src/core/routingEngine';
 
 process.env.RAZORPAY_WEBHOOK_SECRET = 'test_razorpay_webhook_secret';
 process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_stripe_webhook_secret';
@@ -24,6 +25,9 @@ function fakeAdapter(name: ProcessorName, script: (req: ChargeRequest) => Promis
 beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
   await mongoose.connect(mongod.getUri());
+  // These route tests are about the HTTP layer, not weighted routing — force
+  // a deterministic 'razorpay' initial pick (see routingWeights.test.ts).
+  setRandomFn(() => 0);
 });
 
 afterAll(async () => {
@@ -78,7 +82,7 @@ describe('GET /payments/:id and /payments/:id/events', () => {
 
   it('returns the payment status and its full event timeline after a failover', async () => {
     setAdapters({
-      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'BANK_SERVER_DOWN' })),
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'PROCESSOR_GATEWAY_ERROR' })),
       cashfree: fakeAdapter('cashfree', async () => ({ processorRef: 'cf_order_route_1', status: 'succeeded' })),
     });
 
@@ -102,6 +106,55 @@ describe('GET /payments/:id and /payments/:id/events', () => {
       'retrying',
       'succeeded',
     ]);
+    const failedEvent = eventsRes.body.find((e: { state: string }) => e.state === 'failed');
+    expect(failedEvent.declineScope).toBe('processor');
+  });
+
+  it('exposes the payer VPA handle/PSP classification when a VPA was provided', async () => {
+    setAdapters({ razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_vpa_1', status: 'processing' })) });
+
+    const created = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-key-vpa-1')
+      .send({ amount: 20000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com', payerVpa: 'demo@ybl' });
+
+    const getRes = await request(app).get(`/payments/${created.body.paymentId}`);
+    expect(getRes.body).toMatchObject({ payerVpa: 'demo@ybl', upiHandle: 'ybl', upiPsp: 'phonepe' });
+  });
+});
+
+describe('GET /payments (list)', () => {
+  it('returns the most recently created payments first', async () => {
+    setAdapters({ razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_list_1', status: 'processing' })) });
+
+    const first = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-list-1')
+      .send({ amount: 10000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+    const second = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-list-2')
+      .send({ amount: 20000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+
+    const listRes = await request(app).get('/payments');
+    expect(listRes.status).toBe(200);
+    const ids = listRes.body.map((p: { paymentId: string }) => p.paymentId);
+    expect(ids.indexOf(second.body.paymentId)).toBeLessThan(ids.indexOf(first.body.paymentId));
+  });
+
+  it('supports filtering by status', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'INVALID_VPA' })),
+    });
+
+    await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-list-3')
+      .send({ amount: 10000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+
+    const listRes = await request(app).get('/payments?status=failed');
+    expect(listRes.status).toBe(200);
+    expect(listRes.body.every((p: { status: string }) => p.status === 'failed')).toBe(true);
   });
 });
 
@@ -211,7 +264,7 @@ describe('POST /webhooks/cashfree', () => {
 
   it('accepts a correctly signed webhook and updates the transaction', async () => {
     setAdapters({
-      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'BANK_SERVER_DOWN' })),
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: '', status: 'failed', declineCode: 'PROCESSOR_GATEWAY_ERROR' })),
       cashfree: fakeAdapter('cashfree', async () => ({ processorRef: 'cf_order_webhook_1', status: 'processing' })),
     });
 
@@ -244,5 +297,37 @@ describe('POST /webhooks/cashfree', () => {
     expect(getRes.body.status).toBe('succeeded');
     expect(getRes.body.processor).toBe('cashfree');
     expect(getRes.body.retriedFrom).toBe('razorpay');
+  });
+});
+
+describe('GET /reconciliation', () => {
+  it('returns per-processor and overall stats reflecting recorded payments', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_recon_1', status: 'succeeded' })),
+    });
+
+    await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-recon-1')
+      .send({ amount: 10000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+
+    const res = await request(app).get('/reconciliation');
+    expect(res.status).toBe(200);
+    expect(res.body.overall.totalPayments).toBeGreaterThanOrEqual(1);
+    const razorpayStats = res.body.perProcessor.find((p: { processor: string }) => p.processor === 'razorpay');
+    expect(razorpayStats.succeeded).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('GET /dashboard', () => {
+  it('redirects a bare /dashboard request to add the trailing slash', async () => {
+    const res = await request(app).get('/dashboard');
+    expect(res.status).toBe(301);
+  });
+
+  it('serves the static dashboard HTML page at /dashboard/', async () => {
+    const res = await request(app).get('/dashboard/');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('PayHub Dashboard');
   });
 });

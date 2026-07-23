@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PayHub Dashboard</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --border: #e2e5ea;
+    --text: #1a1d23;
+    --muted: #6b7280;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin: 0 0 24px; }
+  .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  select, button, input {
+    font-size: 13px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--text);
+  }
+  button { cursor: pointer; }
+  button:hover { background: #f0f1f3; }
+  .summary { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    min-width: 120px;
+  }
+  .stat-card .value { font-size: 22px; font-weight: 600; }
+  .stat-card .label { font-size: 12px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; background: #fafbfc; }
+  tr.payment-row { cursor: pointer; }
+  tr.payment-row:hover { background: #fafbfc; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+  .badge.created { background: #eef0f2; color: #4b5563; }
+  .badge.processing { background: #e0edff; color: #1d4ed8; }
+  .badge.retrying { background: #fff3d6; color: #92400e; }
+  .badge.succeeded { background: #dcfce7; color: #15803d; }
+  .badge.failed { background: #fee2e2; color: #b91c1c; }
+  .events-row td { background: #fafbfc; padding: 0; }
+  .events-panel { padding: 14px 20px; }
+  .event-line { display: flex; gap: 10px; align-items: baseline; font-size: 12px; padding: 4px 0; border-bottom: 1px dashed var(--border); }
+  .event-line:last-child { border-bottom: none; }
+  .event-line .ts { color: var(--muted); font-family: var(--mono); min-width: 170px; }
+  .event-line .reason { color: var(--muted); }
+  .scope-tag { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: #ede9fe; color: #6d28d9; margin-left: 4px; }
+  .empty { padding: 30px; text-align: center; color: var(--muted); font-size: 13px; }
+  .error-banner { background: #fee2e2; color: #b91c1c; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; display: none; }
+</style>
+</head>
+<body>
+  <h1>PayHub Dashboard</h1>
+  <p class="subtitle">Read-only view over PayHub's own API. No auth — for local/demo use only.</p>
+
+  <div id="errorBanner" class="error-banner"></div>
+
+  <div class="summary" id="summary"></div>
+
+  <h2 style="font-size:15px;margin:0 0 10px;">Reconciliation — per processor</h2>
+  <table style="margin-bottom:24px;">
+    <thead>
+      <tr>
+        <th>Processor</th>
+        <th>Attempts</th>
+        <th>Succeeded</th>
+        <th>Failed</th>
+        <th>Success rate</th>
+        <th>Avg. time to success</th>
+      </tr>
+    </thead>
+    <tbody id="reconciliationBody"></tbody>
+  </table>
+
+  <div class="toolbar">
+    <label for="statusFilter" style="font-size:13px;color:var(--muted);">Status</label>
+    <select id="statusFilter">
+      <option value="">All</option>
+      <option value="created">created</option>
+      <option value="processing">processing</option>
+      <option value="retrying">retrying</option>
+      <option value="succeeded">succeeded</option>
+      <option value="failed">failed</option>
+    </select>
+    <button id="refreshBtn">Refresh</button>
+    <span id="lastUpdated" class="mono" style="color:var(--muted);font-size:12px;"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Payment ID</th>
+        <th>Status</th>
+        <th>Processor</th>
+        <th>Retried From</th>
+        <th>Amount</th>
+        <th>UPI PSP</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody id="paymentsBody"></tbody>
+  </table>
+  <div id="emptyState" class="empty" style="display:none;">No payments yet — create one via POST /payments.</div>
+
+  <script>
+    const state = { expandedId: null };
+
+    function formatAmount(amount, currency) {
+      return (amount / 100).toLocaleString('en-IN', { style: 'currency', currency: currency || 'INR' });
+    }
+
+    function showError(message) {
+      const banner = document.getElementById('errorBanner');
+      if (!message) { banner.style.display = 'none'; return; }
+      banner.textContent = message;
+      banner.style.display = 'block';
+    }
+
+    async function fetchJson(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+      return res.json();
+    }
+
+    function renderSummary(payments) {
+      const total = payments.length;
+      const byStatus = payments.reduce((acc, p) => { acc[p.status] = (acc[p.status] || 0) + 1; return acc; }, {});
+      const succeeded = byStatus.succeeded || 0;
+      const failed = byStatus.failed || 0;
+      const closed = succeeded + failed;
+      const successRate = closed > 0 ? Math.round((succeeded / closed) * 100) : null;
+
+      const cards = [
+        { label: 'Total (shown)', value: total },
+        { label: 'Succeeded', value: succeeded },
+        { label: 'Failed', value: failed },
+        { label: 'In flight', value: (byStatus.processing || 0) + (byStatus.retrying || 0) },
+        { label: 'Success rate', value: successRate === null ? '—' : successRate + '%' },
+      ];
+
+      document.getElementById('summary').innerHTML = cards
+        .map((c) => `<div class="stat-card"><div class="value">${c.value}</div><div class="label">${c.label}</div></div>`)
+        .join('');
+    }
+
+    function renderPayments(payments) {
+      const body = document.getElementById('paymentsBody');
+      const emptyState = document.getElementById('emptyState');
+
+      if (payments.length === 0) {
+        body.innerHTML = '';
+        emptyState.style.display = 'block';
+        return;
+      }
+      emptyState.style.display = 'none';
+
+      body.innerHTML = payments
+        .map((p) => `
+          <tr class="payment-row" data-id="${p.paymentId}">
+            <td class="mono">${p.paymentId}</td>
+            <td><span class="badge ${p.status}">${p.status}</span></td>
+            <td>${p.processor || '—'}</td>
+            <td>${p.retriedFrom || '—'}</td>
+            <td>${formatAmount(p.amount, p.currency)}</td>
+            <td>${p.upiPsp || '—'}</td>
+            <td class="mono">${new Date(p.createdAt).toLocaleString()}</td>
+          </tr>
+          <tr class="events-row" id="events-${p.paymentId}" style="display:none;"><td colspan="7"></td></tr>
+        `)
+        .join('');
+
+      document.querySelectorAll('tr.payment-row').forEach((row) => {
+        row.addEventListener('click', () => toggleEvents(row.dataset.id));
+      });
+
+      if (state.expandedId) {
+        const stillExists = payments.some((p) => p.paymentId === state.expandedId);
+        if (stillExists) loadEvents(state.expandedId);
+      }
+    }
+
+    async function toggleEvents(paymentId) {
+      const row = document.getElementById(`events-${paymentId}`);
+      if (!row) return;
+      const isOpen = row.style.display !== 'none';
+      document.querySelectorAll('.events-row').forEach((r) => (r.style.display = 'none'));
+      if (isOpen) {
+        state.expandedId = null;
+        return;
+      }
+      state.expandedId = paymentId;
+      row.style.display = 'table-row';
+      await loadEvents(paymentId);
+    }
+
+    async function loadEvents(paymentId) {
+      const row = document.getElementById(`events-${paymentId}`);
+      if (!row) return;
+      row.style.display = 'table-row';
+      const cell = row.querySelector('td');
+      cell.innerHTML = '<div class="events-panel">Loading timeline…</div>';
+      try {
+        const events = await fetchJson(`/payments/${paymentId}/events`);
+        cell.innerHTML = `<div class="events-panel">${events
+          .map(
+            (e) => `<div class="event-line">
+              <span class="ts">${new Date(e.timestamp).toLocaleString()}</span>
+              <span class="badge ${e.state}">${e.state}</span>
+              ${e.processor ? `<span>${e.processor}</span>` : ''}
+              ${e.reason ? `<span class="reason">${e.reason}</span>` : ''}
+              ${e.declineScope ? `<span class="scope-tag">${e.declineScope}</span>` : ''}
+            </div>`
+          )
+          .join('')}</div>`;
+      } catch (err) {
+        cell.innerHTML = `<div class="events-panel">Failed to load timeline: ${err.message}</div>`;
+      }
+    }
+
+    function formatDuration(ms) {
+      if (ms === null || ms === undefined) return '—';
+      if (ms < 1000) return `${ms}ms`;
+      return `${(ms / 1000).toFixed(1)}s`;
+    }
+
+    function renderReconciliation(report) {
+      const body = document.getElementById('reconciliationBody');
+      if (!report.perProcessor.length) {
+        body.innerHTML = '<tr><td colspan="6" style="color:var(--muted);">No attempts recorded yet.</td></tr>';
+        return;
+      }
+      body.innerHTML = report.perProcessor
+        .map(
+          (p) => `<tr>
+            <td>${p.processor}</td>
+            <td>${p.totalAttempts}</td>
+            <td>${p.succeeded}</td>
+            <td>${p.failed}</td>
+            <td>${p.successRate === null ? '—' : p.successRate + '%'}</td>
+            <td>${formatDuration(p.averageTimeToSuccessMs)}</td>
+          </tr>`
+        )
+        .join('');
+    }
+
+    async function refresh() {
+      showError(null);
+      try {
+        const status = document.getElementById('statusFilter').value;
+        const url = status ? `/payments?limit=100&status=${encodeURIComponent(status)}` : '/payments?limit=100';
+        const [payments, reconciliation] = await Promise.all([fetchJson(url), fetchJson('/reconciliation')]);
+        renderSummary(payments);
+        renderPayments(payments);
+        renderReconciliation(reconciliation);
+        document.getElementById('lastUpdated').textContent = 'updated ' + new Date().toLocaleTimeString();
+      } catch (err) {
+        showError('Failed to load dashboard data: ' + err.message);
+      }
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', refresh);
+    document.getElementById('statusFilter').addEventListener('change', refresh);
+
+    refresh();
+  </script>
+</body>
+</html>

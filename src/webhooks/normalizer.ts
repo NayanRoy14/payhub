@@ -1,26 +1,50 @@
 import { NormalizedWebhookEvent } from '../adapters/adapter.interface';
 
 /**
- * Maps each processor's native error/reason code to PayHub's internal decline-code
- * vocabulary. Unknown codes are upper-cased and passed through as-is so isRetryable()
- * (core/routingEngine.ts) can still apply its safe "unknown -> fail fast" default.
+ * Maps each processor's native error/reason code onto PayHub's internal
+ * decline-code vocabulary (see core/declineTaxonomy.ts for the full taxonomy
+ * and scope model). Unknown codes are upper-cased and passed through as-is so
+ * isRetryable() can still apply its safe "unknown -> fail fast" default.
+ *
+ * Note the same raw string can map differently across processors when its
+ * real-world meaning differs: Razorpay's docs describe `gateway_error` as
+ * originating "at the bank or wallet provider's end" (bank_or_vpa scope,
+ * failover can't help), whereas Razorpay's own `server_error` is unambiguously
+ * Razorpay's own infra (processor scope, failover is worth trying). Where a
+ * processor's error is genuinely ambiguous, the conservative choice is
+ * bank_or_vpa (non-retryable) — the same safe-default philosophy as unknown
+ * codes.
  */
-const RAZORPAY_DECLINE_CODE_MAP: Record<string, string> = {
+export const RAZORPAY_DECLINE_CODE_MAP: Record<string, string> = {
   bad_request_error: 'INVALID_VPA',
-  gateway_error: 'BANK_SERVER_DOWN',
-  server_error: 'PROCESSOR_UNAVAILABLE',
+  gateway_error: 'ISSUING_BANK_UNAVAILABLE',
+  server_error: 'PROCESSOR_GATEWAY_ERROR',
+  payment_declined: 'ISSUING_BANK_UNAVAILABLE',
+  insufficient_funds: 'INSUFFICIENT_FUNDS',
+  invalid_vpa: 'INVALID_VPA',
+  transaction_limit_exceeded: 'TXN_LIMIT_EXCEEDED',
+  fraud_suspected: 'FRAUD_SUSPECTED',
 };
 
-const STRIPE_DECLINE_CODE_MAP: Record<string, string> = {
-  authentication_required: 'INVALID_VPA',
+/**
+ * Stripe is dormant in the active routing rotation (see routingEngine.ts) —
+ * it predates PayHub's UPI-first pivot to Cashfree, so this mapping is kept
+ * minimal rather than tuned for UPI-specific nuance.
+ */
+export const STRIPE_DECLINE_CODE_MAP: Record<string, string> = {
+  authentication_required: 'INVALID_MPIN',
   card_declined: 'TXN_LIMIT_EXCEEDED',
-  processing_error: 'BANK_SERVER_DOWN',
+  processing_error: 'PROCESSOR_GATEWAY_ERROR',
 };
 
-const CASHFREE_DECLINE_CODE_MAP: Record<string, string> = {
-  transaction_declined: 'INVALID_VPA',
-  gateway_error: 'BANK_SERVER_DOWN',
-  npci_error: 'NPCI_UNAVAILABLE',
+export const CASHFREE_DECLINE_CODE_MAP: Record<string, string> = {
+  transaction_declined: 'ISSUING_BANK_UNAVAILABLE',
+  gateway_error: 'ISSUING_BANK_UNAVAILABLE',
+  npci_error: 'NPCI_NETWORK_CONGESTION',
+  npci_timeout: 'NPCI_TIMEOUT',
+  invalid_vpa: 'INVALID_VPA',
+  insufficient_funds: 'INSUFFICIENT_FUNDS',
+  internal_error: 'PROCESSOR_UNAVAILABLE',
 };
 
 /**

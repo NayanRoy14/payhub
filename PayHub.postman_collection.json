@@ -138,7 +138,60 @@
             "method": "GET",
             "header": [],
             "url": "{{baseUrl}}/payments/{{paymentId}}/events",
-            "description": "Full state timeline for the payment, e.g.:\n[\n  { \"state\": \"created\", ... },\n  { \"state\": \"processing\", \"processor\": \"razorpay\", ... },\n  { \"state\": \"failed\", \"processor\": \"razorpay\", \"reason\": \"declineCode:BANK_SERVER_DOWN\", ... },\n  { \"state\": \"retrying\", \"processor\": \"cashfree\", ... },\n  { \"state\": \"succeeded\", \"processor\": \"cashfree\", ... }\n]\n\nRun the webhook requests below (against the razorpayOrderId from this payment's first attempt) to build out this timeline."
+            "description": "Full state timeline for the payment, e.g.:\n[\n  { \"state\": \"created\", ... },\n  { \"state\": \"processing\", \"processor\": \"razorpay\", ... },\n  { \"state\": \"failed\", \"processor\": \"razorpay\", \"reason\": \"declineCode:ISSUING_BANK_UNAVAILABLE\", \"declineScope\": \"bank_or_vpa\", ... },\n  { \"state\": \"retrying\", \"processor\": \"cashfree\", ... },\n  { \"state\": \"succeeded\", \"processor\": \"cashfree\", ... }\n]\n\nRun the webhook requests below (against the razorpayOrderId from this payment's first attempt) to build out this timeline. `declineScope` on a failed event explains *why* a failover did or didn't happen — see README \"Decline-code taxonomy & handle-aware routing\"."
+          }
+        },
+        {
+          "name": "Create Payment with VPA (handle-aware routing)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 150000,\n  \"currency\": \"INR\",\n  \"paymentMethod\": \"upi\",\n  \"customerEmail\": \"customer@example.com\",\n  \"payerVpa\": \"customer@ybl\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/payments",
+            "description": "`payerVpa` is optional. When provided, its handle is classified to a UPI PSP (e.g. @ybl -> PhonePe) and stored on the transaction. Check \"Get Payment\" afterward to see payerVpa/upiHandle/upiPsp in the response."
+          }
+        },
+        {
+          "name": "List Payments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/payments?limit=20",
+            "description": "Most-recent-first. Optional `status` query param filters by payment state (created/processing/retrying/succeeded/failed) — e.g. {{baseUrl}}/payments?status=failed. Powers the dashboard's payment list."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reconciliation",
+      "item": [
+        {
+          "name": "Get Reconciliation Report",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/reconciliation",
+            "description": "Per-processor attempt counts, success rate, and average time-to-success, plus overall payment-level stats. The numbers behind \"why orchestration matters\" — also shown in the /dashboard/ UI."
           }
         }
       ]

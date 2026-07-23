@@ -1,6 +1,6 @@
 import Stripe from 'stripe';
 import { ChargeRequest, ChargeResult, NormalizedWebhookEvent, ProcessorAdapter } from './adapter.interface';
-import { normalizeStripeEvent } from '../webhooks/normalizer';
+import { normalizeStripeEvent, STRIPE_DECLINE_CODE_MAP } from '../webhooks/normalizer';
 
 /** Minimal slice of the Stripe SDK surface this adapter depends on — lets tests
  * inject a fake client instead of hitting the real API. */
@@ -10,12 +10,6 @@ export interface StripeClient {
     retrieve(id: string): Promise<any>;
   };
 }
-
-const STRIPE_CHARGE_ERROR_MAP: Record<string, string> = {
-  authentication_required: 'INVALID_VPA',
-  card_declined: 'TXN_LIMIT_EXCEEDED',
-  processing_error: 'BANK_SERVER_DOWN',
-};
 
 export class StripeAdapter implements ProcessorAdapter {
   readonly name = 'stripe' as const;
@@ -44,7 +38,7 @@ export class StripeAdapter implements ProcessorAdapter {
           currency: request.currency.toLowerCase(),
           payment_method_types: ['upi'],
           receipt_email: request.customerEmail,
-          metadata: { paymentId: request.paymentId },
+          metadata: { paymentId: request.paymentId, ...(request.payerVpa ? { payerVpa: request.payerVpa } : {}) },
         },
         { idempotencyKey: request.idempotencyKey }
       );
@@ -54,7 +48,7 @@ export class StripeAdapter implements ProcessorAdapter {
       return {
         processorRef: '',
         status: 'failed',
-        declineCode: STRIPE_CHARGE_ERROR_MAP[code] ?? 'PROCESSOR_UNAVAILABLE',
+        declineCode: STRIPE_DECLINE_CODE_MAP[code] ?? 'PROCESSOR_UNAVAILABLE',
         raw: err,
       };
     }
@@ -75,7 +69,7 @@ export class StripeAdapter implements ProcessorAdapter {
     let declineCode: string | undefined;
     if (status === 'failed') {
       const code: string = intent.last_payment_error?.code ?? 'unknown';
-      declineCode = (STRIPE_CHARGE_ERROR_MAP[code] ?? code).toUpperCase();
+      declineCode = STRIPE_DECLINE_CODE_MAP[code] ?? code.toUpperCase();
     }
     return { processorRef: intent.id, status, declineCode, raw: intent };
   }

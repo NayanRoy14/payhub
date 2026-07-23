@@ -33,7 +33,7 @@ describe('normalizeRazorpayEvent', () => {
 
     const result = normalizeRazorpayEvent(payload);
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('BANK_SERVER_DOWN');
+    expect(result.declineCode).toBe('ISSUING_BANK_UNAVAILABLE');
     expect(result.processorRef).toBe('order_def');
   });
 
@@ -93,7 +93,7 @@ describe('normalizeStripeEvent', () => {
 
     const result = normalizeStripeEvent(payload);
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('BANK_SERVER_DOWN');
+    expect(result.declineCode).toBe('PROCESSOR_GATEWAY_ERROR');
   });
 
   it('treats a still-processing PaymentIntent as processing', () => {
@@ -135,7 +135,7 @@ describe('normalizeCashfreeEvent', () => {
 
     const result = normalizeCashfreeEvent(payload);
     expect(result.status).toBe('failed');
-    expect(result.declineCode).toBe('BANK_SERVER_DOWN');
+    expect(result.declineCode).toBe('ISSUING_BANK_UNAVAILABLE');
     expect(result.processorRef).toBe('order_2');
   });
 
