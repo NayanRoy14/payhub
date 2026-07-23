@@ -30,11 +30,15 @@ export function createApp(): Express {
   // rejection (which would otherwise crash the whole process — see
   // core/paymentService.ts's applyOutcome() comment for the incident this
   // guards against). One bad request should never take down every other
-  // in-flight request.
+  // in-flight request. Body-parser middleware (e.g. a 413 "payload too
+  // large") also routes its errors here, before any route handler runs —
+  // those already carry the correct HTTP status, so honor it instead of
+  // flattening every error to a generic 500.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+  app.use((err: Error & { status?: number; statusCode?: number }, _req: Request, res: Response, _next: NextFunction) => {
     console.error('[server] unhandled route error', err);
-    res.status(500).json({ error: 'internal server error' });
+    const status = err.status ?? err.statusCode ?? 500;
+    res.status(status).json({ error: status === 500 ? 'internal server error' : err.message });
   });
 
   return app;

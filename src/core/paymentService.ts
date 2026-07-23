@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import mongoose from 'mongoose';
 import { TransactionModel, TransactionDocument } from '../db/models/transaction.model';
 import { ChargeResult, NormalizedWebhookEvent, ProcessorAdapter, ProcessorName } from '../adapters/adapter.interface';
 import { RazorpayAdapter } from '../adapters/razorpay.adapter';
@@ -207,8 +208,28 @@ export async function listPayments(options: ListPaymentsOptions = {}): Promise<T
  * a payment has already reached a terminal state are dropped rather than
  * re-processed — applyOutcome() itself guards against invalid state
  * transitions, since webhook delivery is at-least-once and unordered.
+ *
+ * SECURITY: processorRef comes from parsed, attacker-influenceable JSON (a
+ * processor's own error in validating a payload, or a compromised webhook
+ * secret, could put anything there — e.g. a Mongo query operator object like
+ * { $ne: null } instead of a plain string). Passing that straight into a
+ * Mongo query as $elemMatch's value lets it be interpreted as a query
+ * operator rather than a literal to match, matching arbitrary documents
+ * instead of none — a NoSQL injection. Every field used inside a DB query
+ * here MUST be verified to be a plain, non-empty string first.
  */
 export async function handleWebhookEvent(event: NormalizedWebhookEvent): Promise<TransactionDocument | null> {
+  if (typeof event.processorRef !== 'string' || event.processorRef.length === 0) {
+    console.warn(
+      `[paymentService] rejecting webhook with a non-string/empty processorRef (possible injection attempt): processor=${event.processor}`
+    );
+    return null;
+  }
+  if (typeof event.processor !== 'string' || event.processor.length === 0) {
+    console.warn('[paymentService] rejecting webhook with a non-string/empty processor field');
+    return null;
+  }
+
   const doc = await TransactionModel.findOne({
     attempts: { $elemMatch: { processor: event.processor, processorRef: event.processorRef } },
   });
@@ -225,6 +246,25 @@ export async function handleWebhookEvent(event: NormalizedWebhookEvent): Promise
   }
 
   await applyOutcome(doc, event.processor, { status: event.status, declineCode: event.declineCode });
-  await doc.save();
+
+  try {
+    await doc.save();
+  } catch (err) {
+    if (err instanceof mongoose.Error.VersionError) {
+      // Another concurrent webhook delivery for this same payment already
+      // saved its own changes first (webhook delivery is at-least-once, so
+      // this is almost always a duplicate/retried delivery of the identical
+      // event, not two genuinely different updates). Rather than blindly
+      // retrying — which risks re-running attemptCharge()'s real processor
+      // API call a second time — drop this write and report the version that
+      // actually won, which already reflects the correct outcome.
+      console.warn(
+        `[paymentService] concurrent webhook write conflict for payment=${doc.paymentId}, processor=${event.processor}: dropping this update, another delivery already saved`
+      );
+      return TransactionModel.findOne({ paymentId: doc.paymentId });
+    }
+    throw err;
+  }
+
   return doc;
 }

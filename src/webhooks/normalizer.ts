@@ -48,27 +48,44 @@ export const CASHFREE_DECLINE_CODE_MAP: Record<string, string> = {
 };
 
 /**
+ * Webhook bodies are parsed, attacker-influenceable JSON — any field can be
+ * any JSON type regardless of what a processor's docs promise, and downstream
+ * code (Mongo queries, .toUpperCase() calls) assumes strings. This coerces
+ * safely instead of trusting the input: non-strings become `fallback` rather
+ * than propagating an object/array/number into code that expects text.
+ */
+function asString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+/** Same idea, but returns undefined (not a fallback string) for an optional field like processorRef. */
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
  * Razorpay webhook envelope shape (test-mode payloads match this structure):
  * { event: 'payment.captured' | 'payment.failed' | ..., payload: { payment: { entity: {...} } } }
  */
 export function normalizeRazorpayEvent(payload: any): NormalizedWebhookEvent {
   const entity = payload?.payload?.payment?.entity ?? payload?.payload?.order?.entity ?? {};
-  const eventName: string = payload?.event ?? '';
+  const eventName = asString(payload?.event, '');
+  const entityStatus = asString(entity?.status, '');
 
   let status: NormalizedWebhookEvent['status'] = 'processing';
   let declineCode: string | undefined;
 
-  if (eventName === 'payment.captured' || entity.status === 'captured') {
+  if (eventName === 'payment.captured' || entityStatus === 'captured') {
     status = 'succeeded';
-  } else if (eventName === 'payment.failed' || entity.status === 'failed') {
+  } else if (eventName === 'payment.failed' || entityStatus === 'failed') {
     status = 'failed';
-    const reason: string = entity.error_reason ?? entity.error_code ?? 'unknown';
+    const reason = asString(entity?.error_reason, asString(entity?.error_code, 'unknown'));
     declineCode = RAZORPAY_DECLINE_CODE_MAP[reason] ?? reason.toUpperCase();
   }
 
   return {
     processor: 'razorpay',
-    processorRef: entity.order_id ?? entity.id,
+    processorRef: asOptionalString(entity?.order_id) ?? asOptionalString(entity?.id) ?? '',
     status,
     declineCode,
     raw: payload,
@@ -80,21 +97,22 @@ export function normalizeRazorpayEvent(payload: any): NormalizedWebhookEvent {
  */
 export function normalizeStripeEvent(payload: any): NormalizedWebhookEvent {
   const intent = payload?.data?.object ?? {};
+  const intentStatus = asString(intent?.status, '');
 
   let status: NormalizedWebhookEvent['status'] = 'processing';
   let declineCode: string | undefined;
 
-  if (intent.status === 'succeeded') {
+  if (intentStatus === 'succeeded') {
     status = 'succeeded';
-  } else if (intent.status === 'canceled' || intent.status === 'requires_payment_method') {
+  } else if (intentStatus === 'canceled' || intentStatus === 'requires_payment_method') {
     status = 'failed';
-    const code: string = intent.last_payment_error?.code ?? 'unknown';
+    const code = asString(intent?.last_payment_error?.code, 'unknown');
     declineCode = STRIPE_DECLINE_CODE_MAP[code] ?? code.toUpperCase();
   }
 
   return {
     processor: 'stripe',
-    processorRef: intent.id,
+    processorRef: asOptionalString(intent?.id) ?? '',
     status,
     declineCode,
     raw: payload,
@@ -109,26 +127,27 @@ export function normalizeStripeEvent(payload: any): NormalizedWebhookEvent {
 export function normalizeCashfreeEvent(payload: any): NormalizedWebhookEvent {
   const order = payload?.data?.order ?? {};
   const payment = payload?.data?.payment ?? {};
-  const eventType: string = payload?.type ?? '';
+  const eventType = asString(payload?.type, '');
+  const paymentStatus = asString(payment?.payment_status, '');
 
   let status: NormalizedWebhookEvent['status'] = 'processing';
   let declineCode: string | undefined;
 
-  if (eventType === 'PAYMENT_SUCCESS_WEBHOOK' || payment.payment_status === 'SUCCESS') {
+  if (eventType === 'PAYMENT_SUCCESS_WEBHOOK' || paymentStatus === 'SUCCESS') {
     status = 'succeeded';
   } else if (
     eventType === 'PAYMENT_FAILED_WEBHOOK' ||
     eventType === 'PAYMENT_USER_DROPPED_WEBHOOK' ||
-    ['FAILED', 'USER_DROPPED', 'CANCELLED'].includes(payment.payment_status)
+    ['FAILED', 'USER_DROPPED', 'CANCELLED'].includes(paymentStatus)
   ) {
     status = 'failed';
-    const reason: string = payment.error_details?.error_code ?? payment.error_details?.error_reason ?? 'unknown';
+    const reason = asString(payment?.error_details?.error_code, asString(payment?.error_details?.error_reason, 'unknown'));
     declineCode = CASHFREE_DECLINE_CODE_MAP[reason] ?? reason.toUpperCase();
   }
 
   return {
     processor: 'cashfree',
-    processorRef: order.order_id,
+    processorRef: asOptionalString(order?.order_id) ?? '',
     status,
     declineCode,
     raw: payload,

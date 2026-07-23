@@ -361,6 +361,69 @@ describe('GET /reconciliation', () => {
   });
 });
 
+describe('webhook security & error handling', () => {
+  it('regression: rejects a NoSQL injection attempt (processorRef as a Mongo operator object) without mutating any transaction', async () => {
+    setAdapters({ razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_injection_target', status: 'processing' })) });
+
+    const victim = await request(app)
+      .post('/payments')
+      .set('Idempotency-Key', 'route-test-injection-1')
+      .send({ amount: 40000, currency: 'INR', paymentMethod: 'upi', customerEmail: 'a@b.com' });
+    expect(victim.body.status).toBe('processing');
+
+    const payload = {
+      event: 'payment.captured',
+      payload: { payment: { entity: { id: 'pay_injection', order_id: { $ne: null }, status: 'captured' } } },
+    };
+    const rawBody = JSON.stringify(payload);
+    const signature = crypto.createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET!).update(rawBody).digest('hex');
+
+    const webhookRes = await request(app)
+      .post('/webhooks/razorpay')
+      .set('Content-Type', 'application/json')
+      .set('x-razorpay-signature', signature)
+      .send(rawBody);
+
+    expect(webhookRes.status).toBe(200); // signature valid, so it's acknowledged — but nothing should be mutated
+
+    const getRes = await request(app).get(`/payments/${victim.body.paymentId}`);
+    expect(getRes.body.status).toBe('processing'); // the unrelated in-flight payment must be untouched
+  });
+
+  it('returns a clean error (not a crash) for a malformed JSON body with an otherwise-valid signature', async () => {
+    const rawBody = 'not valid json at all {{{';
+    const signature = crypto.createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET!).update(rawBody).digest('hex');
+
+    const res = await request(app)
+      .post('/webhooks/razorpay')
+      .set('Content-Type', 'application/json')
+      .set('x-razorpay-signature', signature)
+      .send(rawBody);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('internal server error');
+
+    // The server must still be serving other requests normally afterward.
+    const healthRes = await request(app).get('/health');
+    expect(healthRes.status).toBe(200);
+  });
+
+  it('returns 413 (not 500) for an oversized webhook body, preserving body-parser\'s own status code', async () => {
+    const oversizedBody = JSON.stringify({ event: 'payment.captured', junk: 'A'.repeat(200_000) }); // > express.raw()'s default 100kb limit
+
+    const res = await request(app)
+      .post('/webhooks/razorpay')
+      .set('Content-Type', 'application/json')
+      .set('x-razorpay-signature', 'irrelevant-too-large-to-check')
+      .send(oversizedBody);
+
+    expect(res.status).toBe(413);
+
+    const healthRes = await request(app).get('/health');
+    expect(healthRes.status).toBe(200);
+  });
+});
+
 describe('GET /dashboard', () => {
   it('redirects a bare /dashboard request to add the trailing slash', async () => {
     const res = await request(app).get('/dashboard');

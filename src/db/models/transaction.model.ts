@@ -82,7 +82,20 @@ const TransactionSchema = new Schema<TransactionDocument>(
     attempts: { type: [AttemptSchema], default: [] },
     events: { type: [EventSchema], default: [] },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    // Two webhooks can legitimately arrive for the same transaction at
+    // effectively the same instant (at-least-once delivery, retries). Without
+    // this, two concurrent request handlers each load their own in-memory
+    // copy, mutate independently, and whichever calls save() second silently
+    // overwrites the first's changes — a real lost-update race that corrupts
+    // the event timeline (observed: a stale "failed" event reappearing after
+    // a later "retrying" event). optimisticConcurrency makes save() include
+    // the document's version in its filter, so the loser's save() throws a
+    // VersionError instead of clobbering the winner's write — see
+    // paymentService.ts's handleWebhookEvent for how that's handled.
+    optimisticConcurrency: true,
+  }
 );
 
 export const TransactionModel = model<TransactionDocument>('Transaction', TransactionSchema);

@@ -322,4 +322,69 @@ describe('webhook robustness against stale/out-of-order events', () => {
     const afterStaleWebhook = await getPayment(tx.paymentId);
     expect(afterStaleWebhook?.status).toBe('succeeded'); // unchanged
   });
+
+  it('rejects a webhook whose processorRef is a Mongo query operator object instead of a string (NoSQL injection attempt)', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_injection_victim', status: 'processing' })),
+    });
+
+    const victim = await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-injection-1' });
+    expect(victim.status).toBe('processing');
+
+    const result = await handleWebhookEvent({
+      processor: 'razorpay',
+      processorRef: { $ne: null } as unknown as string, // simulates a malicious/malformed webhook payload
+      status: 'succeeded',
+      raw: {},
+    });
+
+    expect(result).toBeNull(); // rejected before ever reaching the DB query
+
+    const afterAttack = await getPayment(victim.paymentId);
+    expect(afterAttack?.status).toBe('processing'); // the unrelated victim payment must be untouched
+  });
+});
+
+describe('concurrent webhook delivery (race conditions)', () => {
+  // Regression test for a real incident found via manual concurrent-request
+  // testing: two webhooks for the same payment arriving at effectively the
+  // same instant each loaded their own in-memory copy of the document,
+  // mutated independently, and the second save() silently overwrote the
+  // first's changes — corrupting the event timeline (a stale 'failed' event
+  // reappeared after a later 'retrying' event). optimisticConcurrency on the
+  // schema now makes the loser's save() throw a VersionError instead, which
+  // handleWebhookEvent() catches and drops cleanly.
+  it('does not corrupt the event timeline when the same webhook is delivered twice concurrently', async () => {
+    setAdapters({
+      razorpay: fakeAdapter('razorpay', async () => ({ processorRef: 'order_concurrent_1', status: 'processing' })),
+      cashfree: fakeAdapter('cashfree', async () => ({ processorRef: 'cf_concurrent_1', status: 'processing' })),
+    });
+
+    const tx = await createPayment({ ...basePaymentInput, idempotencyKey: 'idem-concurrent-1' });
+    expect(tx.status).toBe('processing');
+
+    const event = {
+      processor: 'razorpay' as const,
+      processorRef: 'order_concurrent_1',
+      status: 'failed' as const,
+      declineCode: 'PROCESSOR_GATEWAY_ERROR',
+      raw: {},
+    };
+
+    // Fire the identical webhook twice concurrently, simulating at-least-once
+    // delivery racing itself.
+    const results = await Promise.allSettled([handleWebhookEvent(event), handleWebhookEvent(event)]);
+    expect(results.every((r) => r.status === 'fulfilled')).toBe(true); // neither call should throw
+
+    const final = await getPayment(tx.paymentId);
+    expect(final?.status).toBe('retrying');
+    // Exactly one failover attempt to cashfree — not two — regardless of which
+    // concurrent delivery "won".
+    expect(final?.attempts.filter((a) => a.processor === 'cashfree')).toHaveLength(1);
+
+    // The event timeline must be a valid, non-corrupted sequence: no state
+    // may appear after a later state that logically supersedes it.
+    const states = final!.events.map((e) => e.state);
+    expect(states).toEqual(['created', 'processing', 'failed', 'retrying']);
+  });
 });
