@@ -194,6 +194,17 @@ have Stripe test credentials and flip `routingEngine`'s `PROCESSOR_ORDER` back.
    npm run dev
    ```
 
+## Postman collection
+
+`PayHub.postman_collection.json` covers every endpoint — the happy path, both
+error paths (400/401/404), and signed webhook requests for all three processors
+(Razorpay HMAC, Cashfree timestamp+body HMAC, Stripe's `t=...,v1=...` scheme).
+Import it into Postman, set `baseUrl` and the `*WebhookSecret`/`*SecretKey`
+variables to match your `.env`, then run "Create Payment" first — its test
+script captures `paymentId` for the other requests. The collection's own
+description (visible in Postman) has the full walkthrough, including how to
+get the real Razorpay/Cashfree order IDs the webhook requests need.
+
 ## Testing
 
 - Unit tests: routing engine decisions, `isRetryable()`, state machine transitions,

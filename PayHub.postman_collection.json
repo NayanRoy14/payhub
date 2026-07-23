@@ -1,0 +1,477 @@
+{
+  "info": {
+    "name": "PayHub",
+    "_postman_id": "b6f2f0d0-6f3a-4e6a-9a1e-payhub00001",
+    "description": "PayHub — UPI-first payment orchestration layer (portfolio/learning project). Not a payment gateway; sits in front of Razorpay + Cashfree test-mode APIs.\n\nHow to use this collection:\n1. Set `baseUrl` (defaults to http://localhost:3000; swap for your ngrok URL if testing webhooks from the real dashboards).\n2. Set `razorpayWebhookSecret` / `cashfreeSecretKey` / `stripeWebhookSecret` to match your `.env` — these are used by pre-request scripts to compute valid signatures, so the webhook requests work out of the box.\n3. Run \"Create Payment\" first — its test script auto-captures `paymentId` into a collection variable for the Get requests.\n4. The webhook requests need a real `processorRef` (Razorpay order_id / Cashfree order_id) to match an existing payment attempt. Since the API doesn't expose that (only the processor name), get it from your server logs or by querying the transaction store directly, then set `razorpayOrderId` / `cashfreeOrderId` accordingly.\n5. Webhook request bodies are stored as collection variables (e.g. `razorpaySuccessPayload`) so the pre-request script signs the exact same bytes that get sent — don't edit the raw body directly, edit the variable instead.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "idempotencyKey", "value": "{{$guid}}" },
+    { "key": "paymentId", "value": "" },
+    { "key": "razorpayOrderId", "value": "order_REPLACE_ME" },
+    { "key": "cashfreeOrderId", "value": "REPLACE_WITH_PAYMENT_ID_USED_AS_CASHFREE_ORDER_ID" },
+    { "key": "stripePaymentIntentId", "value": "pi_REPLACE_ME" },
+    { "key": "razorpayWebhookSecret", "value": "your_razorpay_webhook_secret" },
+    { "key": "cashfreeSecretKey", "value": "your_cashfree_secret_key" },
+    { "key": "stripeWebhookSecret", "value": "whsec_your_stripe_webhook_secret" },
+    { "key": "razorpaySuccessPayload", "value": "{\"event\":\"payment.captured\",\"payload\":{\"payment\":{\"entity\":{\"id\":\"pay_demo_success\",\"order_id\":\"{{razorpayOrderId}}\",\"status\":\"captured\"}}}}" },
+    { "key": "razorpayRetryableFailurePayload", "value": "{\"event\":\"payment.failed\",\"payload\":{\"payment\":{\"entity\":{\"id\":\"pay_demo_fail_retryable\",\"order_id\":\"{{razorpayOrderId}}\",\"status\":\"failed\",\"error_reason\":\"gateway_error\"}}}}" },
+    { "key": "razorpayNonRetryableFailurePayload", "value": "{\"event\":\"payment.failed\",\"payload\":{\"payment\":{\"entity\":{\"id\":\"pay_demo_fail_final\",\"order_id\":\"{{razorpayOrderId}}\",\"status\":\"failed\",\"error_reason\":\"bad_request_error\"}}}}" },
+    { "key": "cashfreeSuccessPayload", "value": "{\"type\":\"PAYMENT_SUCCESS_WEBHOOK\",\"data\":{\"order\":{\"order_id\":\"{{cashfreeOrderId}}\"},\"payment\":{\"payment_status\":\"SUCCESS\"}}}" },
+    { "key": "cashfreeFailurePayload", "value": "{\"type\":\"PAYMENT_FAILED_WEBHOOK\",\"data\":{\"order\":{\"order_id\":\"{{cashfreeOrderId}}\"},\"payment\":{\"payment_status\":\"FAILED\",\"error_details\":{\"error_code\":\"gateway_error\"}}}}" },
+    { "key": "stripeSuccessPayload", "value": "{\"type\":\"payment_intent.succeeded\",\"data\":{\"object\":{\"id\":\"{{stripePaymentIntentId}}\",\"status\":\"succeeded\"}}}" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Payments",
+      "item": [
+        {
+          "name": "Create Payment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('paymentId', body.paymentId);",
+                  "console.log('Captured paymentId ->', body.paymentId, '| routedTo ->', body.routedTo);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 100000,\n  \"currency\": \"INR\",\n  \"paymentMethod\": \"upi\",\n  \"customerEmail\": \"customer@example.com\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/payments",
+            "description": "Creates a payment. Routes to Razorpay (the primary processor) and returns 201 with { paymentId, status, routedTo }. The test script captures paymentId into the collection variable for the next requests.\n\nRe-running this request reuses the same {{idempotencyKey}} (a Postman dynamic variable resolved once per request unless you regenerate it) — send it twice in a row to see the idempotency guarantee: same paymentId both times, no duplicate transaction."
+          }
+        },
+        {
+          "name": "Create Payment (missing Idempotency-Key -> 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": 100000,\n  \"currency\": \"INR\",\n  \"paymentMethod\": \"upi\",\n  \"customerEmail\": \"customer@example.com\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/payments",
+            "description": "Every payment request must carry an Idempotency-Key. Omitting it is rejected with 400."
+          }
+        },
+        {
+          "name": "Get Payment",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/payments/{{paymentId}}",
+            "description": "Returns { paymentId, status, processor, retriedFrom, amount, currency }. Requires `paymentId` to be set — run \"Create Payment\" first, or set it manually."
+          }
+        },
+        {
+          "name": "Get Payment (unknown id -> 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/payments/does-not-exist"
+          }
+        },
+        {
+          "name": "Get Payment Events",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/payments/{{paymentId}}/events",
+            "description": "Full state timeline for the payment, e.g.:\n[\n  { \"state\": \"created\", ... },\n  { \"state\": \"processing\", \"processor\": \"razorpay\", ... },\n  { \"state\": \"failed\", \"processor\": \"razorpay\", \"reason\": \"declineCode:BANK_SERVER_DOWN\", ... },\n  { \"state\": \"retrying\", \"processor\": \"cashfree\", ... },\n  { \"state\": \"succeeded\", \"processor\": \"cashfree\", ... }\n]\n\nRun the webhook requests below (against the razorpayOrderId from this payment's first attempt) to build out this timeline."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks - Razorpay",
+      "item": [
+        {
+          "name": "Payment Captured (Success)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const secret = pm.variables.get('razorpayWebhookSecret');",
+                  "const body = pm.variables.replaceIn('{{razorpaySuccessPayload}}');",
+                  "const signature = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.collectionVariables.set('razorpaySignature', signature);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-razorpay-signature", "value": "{{razorpaySignature}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{razorpaySuccessPayload}}" },
+            "url": "{{baseUrl}}/webhooks/razorpay",
+            "description": "Simulates Razorpay's `payment.captured` webhook. Set `razorpayOrderId` to a real order_id from a payment you created (check server logs / the transaction store), so this webhook matches an existing attempt. Signature is computed automatically in the pre-request script from `razorpaySuccessPayload` + `razorpayWebhookSecret`."
+          }
+        },
+        {
+          "name": "Payment Failed - Retryable (fails over to Cashfree)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const secret = pm.variables.get('razorpayWebhookSecret');",
+                  "const body = pm.variables.replaceIn('{{razorpayRetryableFailurePayload}}');",
+                  "const signature = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.collectionVariables.set('razorpaySignature', signature);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-razorpay-signature", "value": "{{razorpaySignature}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{razorpayRetryableFailurePayload}}" },
+            "url": "{{baseUrl}}/webhooks/razorpay",
+            "description": "Simulates a `gateway_error` decline (maps to BANK_SERVER_DOWN, which isRetryable() says should fail over). PayHub will call the real Cashfree sandbox API to create a fallback order. Check \"Get Payment Events\" afterward to see the `retrying` state appear."
+          }
+        },
+        {
+          "name": "Payment Failed - Non-retryable (fails fast, no failover)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const secret = pm.variables.get('razorpayWebhookSecret');",
+                  "const body = pm.variables.replaceIn('{{razorpayNonRetryableFailurePayload}}');",
+                  "const signature = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.collectionVariables.set('razorpaySignature', signature);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-razorpay-signature", "value": "{{razorpaySignature}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{razorpayNonRetryableFailurePayload}}" },
+            "url": "{{baseUrl}}/webhooks/razorpay",
+            "description": "Simulates a `bad_request_error` decline (maps to INVALID_VPA, which isRetryable() says should fail fast). PayHub will NOT call Cashfree — the payment ends in `failed` with no `retrying` event."
+          }
+        },
+        {
+          "name": "Invalid Signature (401 demo)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-razorpay-signature", "value": "not-a-valid-signature" }
+            ],
+            "body": { "mode": "raw", "raw": "{{razorpaySuccessPayload}}" },
+            "url": "{{baseUrl}}/webhooks/razorpay",
+            "description": "Deliberately wrong signature — demonstrates that unverified webhooks are rejected with 401 rather than trusted."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks - Cashfree",
+      "item": [
+        {
+          "name": "Payment Success",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const secret = pm.variables.get('cashfreeSecretKey');",
+                  "const body = pm.variables.replaceIn('{{cashfreeSuccessPayload}}');",
+                  "const timestamp = Math.floor(Date.now() / 1000).toString();",
+                  "const signature = CryptoJS.HmacSHA256(timestamp + body, secret).toString(CryptoJS.enc.Base64);",
+                  "pm.collectionVariables.set('cashfreeTimestamp', timestamp);",
+                  "pm.collectionVariables.set('cashfreeSignature', signature);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-webhook-signature", "value": "{{cashfreeSignature}}" },
+              { "key": "x-webhook-timestamp", "value": "{{cashfreeTimestamp}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{cashfreeSuccessPayload}}" },
+            "url": "{{baseUrl}}/webhooks/cashfree",
+            "description": "Simulates Cashfree's PAYMENT_SUCCESS_WEBHOOK. Set `cashfreeOrderId` to the processorRef of an existing Cashfree attempt (CashfreeAdapter uses the internal paymentId as the Cashfree order_id, so this is the same value as `paymentId` once a failover to Cashfree has happened). Cashfree signs with timestamp+body HMAC-SHA256/base64 using the same secret as API auth — no separate webhook secret."
+          }
+        },
+        {
+          "name": "Payment Failed (Retryable decline)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const secret = pm.variables.get('cashfreeSecretKey');",
+                  "const body = pm.variables.replaceIn('{{cashfreeFailurePayload}}');",
+                  "const timestamp = Math.floor(Date.now() / 1000).toString();",
+                  "const signature = CryptoJS.HmacSHA256(timestamp + body, secret).toString(CryptoJS.enc.Base64);",
+                  "pm.collectionVariables.set('cashfreeTimestamp', timestamp);",
+                  "pm.collectionVariables.set('cashfreeSignature', signature);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-webhook-signature", "value": "{{cashfreeSignature}}" },
+              { "key": "x-webhook-timestamp", "value": "{{cashfreeTimestamp}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{cashfreeFailurePayload}}" },
+            "url": "{{baseUrl}}/webhooks/cashfree",
+            "description": "If Cashfree is already the fallback (2nd) processor for this payment, this is the exhaustion case — PayHub has no third processor to fail over to, so the payment ends permanently `failed`."
+          }
+        },
+        {
+          "name": "Invalid Signature (401 demo)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-webhook-signature", "value": "not-a-valid-signature" },
+              { "key": "x-webhook-timestamp", "value": "1700000000" }
+            ],
+            "body": { "mode": "raw", "raw": "{{cashfreeSuccessPayload}}" },
+            "url": "{{baseUrl}}/webhooks/cashfree",
+            "description": "Deliberately wrong signature — demonstrates that unverified webhooks are rejected with 401 rather than trusted."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks - Stripe (implemented, dormant route)",
+      "item": [
+        {
+          "name": "Payment Succeeded",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const secret = pm.variables.get('stripeWebhookSecret');",
+                  "const body = pm.variables.replaceIn('{{stripeSuccessPayload}}');",
+                  "const timestamp = Math.floor(Date.now() / 1000).toString();",
+                  "const signedPayload = timestamp + '.' + body;",
+                  "const signature = CryptoJS.HmacSHA256(signedPayload, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.collectionVariables.set('stripeSignatureHeader', 't=' + timestamp + ',v1=' + signature);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "stripe-signature", "value": "{{stripeSignatureHeader}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{stripeSuccessPayload}}" },
+            "url": "{{baseUrl}}/webhooks/stripe",
+            "description": "StripeAdapter and this route are fully implemented and tested, but Stripe isn't in the active routing rotation (routingEngine's PROCESSOR_ORDER is [razorpay, cashfree]) — Stripe India signup is currently invite-only. This request exercises the route/signature-verification path standalone; it won't correspond to a real in-flight payment unless you flip PROCESSOR_ORDER back and have real Stripe test credentials."
+          }
+        },
+        {
+          "name": "Invalid Signature (401 demo)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "stripe-signature", "value": "t=1700000000,v1=deadbeef" }
+            ],
+            "body": { "mode": "raw", "raw": "{{stripeSuccessPayload}}" },
+            "url": "{{baseUrl}}/webhooks/stripe",
+            "description": "Deliberately wrong signature — demonstrates that unverified webhooks are rejected with 401 rather than trusted."
+          }
+        }
+      ]
+    }
+  ]
+}
