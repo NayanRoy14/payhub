@@ -288,9 +288,12 @@ walks you through creating the service and prompts for the required env vars
 - Stripe test-mode credentials are optional (`StripeAdapter` isn't the active
   routed processor — see "Known limitations").
 
-Once live, point each processor's webhook URL (Razorpay/Cashfree dashboard ->
-Webhooks) at `https://<your-render-url>/webhooks/razorpay` and `/webhooks/cashfree`,
-and the read-only dashboard is served at `/dashboard/`.
+Once live, point Razorpay's webhook URL (Razorpay dashboard -> Webhooks) at
+`https://<your-render-url>/webhooks/razorpay`. Cashfree needs no dashboard
+webhook config at all — it has no account-level default webhook, so
+`CashfreeAdapter.charge()` sends `notify_url` on every order instead, using
+`RENDER_EXTERNAL_URL` (auto-injected by Render) or `PUBLIC_BASE_URL` if set.
+The read-only dashboard is served at `/dashboard/`.
 
 Redis isn't required for deployment — the BullMQ verification queue
 (`src/queue/retryQueue.ts`) exists as a safety-net implementation but isn't
@@ -318,7 +321,11 @@ currently wired into `server.ts`'s startup path.
 5. **Cashfree test mode** — sign up at [merchant.cashfree.com](https://merchant.cashfree.com)
    (self-serve, no invite required), switch to **Test Mode**, and grab your App ID
    and Secret Key from Developers -> API Keys. Cashfree signs webhooks with that
-   same secret key (no separate webhook secret to configure).
+   same secret key (no separate webhook secret to configure). Unlike Razorpay,
+   there's no dashboard-level webhook URL to set — Cashfree only sends a webhook
+   for a payment if `notify_url` was included in that payment's Create Order
+   call, so `CashfreeAdapter` sends it on every order using `PUBLIC_BASE_URL`
+   (set this to your ngrok tunnel URL for local testing).
 
    (Optional) **Stripe test mode** — only needed if you have Stripe test-mode
    access (e.g. a non-India account) and want to exercise `StripeAdapter` instead:

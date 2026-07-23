@@ -113,6 +113,15 @@ export class CashfreeAdapter implements ProcessorAdapter {
         order_meta: {
           idempotencyKey: request.idempotencyKey,
           ...(request.payerVpa ? { payerVpa: request.payerVpa } : {}),
+          // Cashfree does not fall back to any account-level default webhook
+          // URL — per Cashfree's own dashboard, a webhook is only ever sent
+          // for a payment if notify_url was included in that payment's
+          // Create Order call. Without this, Cashfree-routed payments would
+          // never receive a webhook at all and could only ever resolve via
+          // polling (verify()). RENDER_EXTERNAL_URL is auto-injected by
+          // Render on every service, so this needs no manual config there;
+          // PUBLIC_BASE_URL is for other hosts/local ngrok tunnels.
+          notify_url: `${process.env.PUBLIC_BASE_URL ?? process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:3000'}/webhooks/cashfree`,
         },
       });
       return { processorRef: order.order_id, status: 'processing', raw: order };
